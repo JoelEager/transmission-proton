@@ -2,6 +2,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::thread;
+use std::time::Duration;
 
 use arboard::Clipboard;
 use chrono::Local;
@@ -146,17 +148,9 @@ fn update_settings_file(config_dir: &Path, port: u16, logger: &Logger) -> Result
     Ok(())
 }
 
-fn run_app(args: Args) -> Result<(), String> {
-    let log_file = match args.log_file {
-        Some(path) => path,
-        None => default_log_file()?,
-    };
-
-    let logger = Logger::new(log_file);
-    logger.writeln_file("=== transmission-proton invoked ===");
-
-    let config_dir = match args.config_dir {
-        Some(dir) => dir,
+fn run_app_logic(args: &Args, logger: &Logger) -> Result<(), String> {
+    let config_dir = match &args.config_dir {
+        Some(dir) => dir.clone(),
         None => default_config_dir()?,
     };
 
@@ -167,26 +161,23 @@ fn run_app(args: Args) -> Result<(), String> {
             }
             p
         }
-        None => match get_port_from_clipboard() {
-            Ok(p) => {
-                logger.log(&format!("Using port {} from clipboard", p));
-                p
-            }
-            Err(e) => {
-                logger.log("Failed to get port from clipboard");
-                return Err(e);
-            }
+        None => {
+            logger.log("Waiting 5 seconds for clipboard to update...");
+            thread::sleep(Duration::from_secs(5));
+            let p = get_port_from_clipboard()?;
+            logger.log(&format!("Using port {} from clipboard", p));
+            p
         }
     };
 
-    update_settings_file(&config_dir, port, &logger)?;
+    update_settings_file(&config_dir, port, logger)?;
 
     if args.skip_launch {
         logger.log("Transmission launch skipped per --skip-launch flag");
         return Ok(());
     }
 
-    let trans_path = args.transmission_path.unwrap_or_else(default_transmission_path);
+    let trans_path = args.transmission_path.clone().unwrap_or_else(default_transmission_path);
     let start_time = Local::now().format("%Y-%m-%d %H:%M:%S");
     logger.log(&format!("Starting Transmission at {} ({})", start_time, trans_path.display()));
 
@@ -196,6 +187,23 @@ fn run_app(args: Args) -> Result<(), String> {
 
     let finish_time = Local::now().format("%Y-%m-%d %H:%M:%S");
     logger.log(&format!("Transmission exited at {} with status: {}", finish_time, status));
+
+    Ok(())
+}
+
+fn run_app(args: Args) -> Result<(), String> {
+    let log_file = match &args.log_file {
+        Some(path) => path.clone(),
+        None => default_log_file()?,
+    };
+
+    let logger = Logger::new(log_file);
+    logger.writeln_file("=== transmission-proton invoked ===");
+
+    if let Err(err) = run_app_logic(&args, &logger) {
+        logger.log(&format!("ERROR: {}", err));
+        return Err(err);
+    }
 
     Ok(())
 }
@@ -287,7 +295,7 @@ mod tests {
         let args = Args {
             config_dir: Some(dir.path().to_path_buf()),
             transmission_path: None,
-            log_file: Some(log_file),
+            log_file: Some(log_file.clone()),
             port: Some(60000),
             skip_launch: true,
         };
@@ -295,6 +303,9 @@ mod tests {
         let result = run_app(args);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Settings file does not exist"));
+
+        let log_content = fs::read_to_string(&log_file).unwrap();
+        assert!(log_content.contains("ERROR: Settings file does not exist"));
     }
 
     #[test]
@@ -305,7 +316,7 @@ mod tests {
         let args = Args {
             config_dir: Some(dir.path().to_path_buf()),
             transmission_path: None,
-            log_file: Some(log_file),
+            log_file: Some(log_file.clone()),
             port: Some(0),
             skip_launch: true,
         };
@@ -313,5 +324,8 @@ mod tests {
         let result = run_app(args);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Port number cannot be 0");
+
+        let log_content = fs::read_to_string(&log_file).unwrap();
+        assert!(log_content.contains("ERROR: Port number cannot be 0"));
     }
 }
