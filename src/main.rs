@@ -44,8 +44,7 @@ impl Logger {
         Self { log_path }
     }
 
-    pub fn log(&self, msg: &str) {
-        println!("{}", msg);
+    pub fn writeln_file(&self, msg: &str) {
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
@@ -53,6 +52,11 @@ impl Logger {
         {
             let _ = writeln!(file, "{}", msg);
         }
+    }
+
+    pub fn log(&self, msg: &str) {
+        println!("{}", msg);
+        self.writeln_file(msg);
     }
 }
 
@@ -117,7 +121,7 @@ fn update_settings_file(config_dir: &Path, port: u16, logger: &Logger) -> Result
 
     settings["peer-port"] = Value::from(port);
 
-    // Format JSON with 4 spaces indentation to match previous python output
+    // Format JSON with 4 spaces indentation
     let buf = Vec::new();
     let formatter = serde_json::ser::PrettyFormatter::with_indent(b"    ");
     let mut ser = serde_json::Serializer::with_formatter(buf, formatter);
@@ -138,6 +142,7 @@ fn update_settings_file(config_dir: &Path, port: u16, logger: &Logger) -> Result
 
 fn run_app(args: Args) -> Result<(), String> {
     let logger = Logger::new(args.log_file);
+    logger.writeln_file("=== transmission-proton invoked ===");
 
     let config_dir = match args.config_dir {
         Some(dir) => dir,
@@ -151,7 +156,16 @@ fn run_app(args: Args) -> Result<(), String> {
             }
             p
         }
-        None => get_port_from_clipboard()?,
+        None => match get_port_from_clipboard() {
+            Ok(p) => {
+                logger.log(&format!("Using port {} from clipboard", p));
+                p
+            }
+            Err(e) => {
+                logger.log("Failed to get port from clipboard");
+                return Err(e);
+            }
+        }
     };
 
     update_settings_file(&config_dir, port, &logger)?;
@@ -170,8 +184,7 @@ fn run_app(args: Args) -> Result<(), String> {
         .map_err(|e| format!("Failed to launch Transmission at '{}': {}", trans_path.display(), e))?;
 
     let finish_time = Local::now().format("%Y-%m-%d %H:%M:%S");
-    logger.log(&format!("Transmission finished at {} with status: {}", finish_time, status));
-    logger.log("Transmission done");
+    logger.log(&format!("Transmission exited at {} with status: {}", finish_time, status));
 
     Ok(())
 }

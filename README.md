@@ -1,20 +1,11 @@
-# transmission-proton
-
-Simple tool to automatically update Transmission's peer port with the port copied to clipboard (e.g. from Proton VPN) and launch Transmission.
-
-## Features
-
-- Reads port number directly from clipboard (or accepts `--port` CLI override)
-- Updates Transmission's `settings.json` (`peer-port`)
-- Launches Transmission and logs start and finish timestamps to stdout and `log.txt`
+# Transmission Proton Helper
+Simple tool to update Transmission's peer port with the port copied to clipboard and launch Transmission. Intended to automatically configure and launch Transmission via Proton VPN using the "Connect and Go" profile option.
 
 ## Build Instructions
-
 ### Prerequisites
 - [Rust & Cargo](https://www.rust-lang.org/tools/install)
 
 ### Building Release Binary
-
 ```bash
 cargo build --release
 ```
@@ -22,7 +13,6 @@ cargo build --release
 The compiled executable will be available at `target/release/transmission-proton` (or `transmission-proton.exe` on Windows).
 
 ## Usage
-
 Simply run the binary:
 
 ```bash
@@ -30,13 +20,12 @@ Simply run the binary:
 ```
 
 ### Options
-
 ```
 Usage: transmission-proton [OPTIONS]
 
 Options:
       --config-dir <CONFIG_DIR>          Directory containing transmission/settings.json
-      --transmission-path <PATH>        Path to Transmission executable
+      --transmission-path <PATH>         Path to Transmission executable
       --log-file <LOG_FILE>              Path to log file [default: log.txt]
       --port <PORT>                      Override port value directly instead of reading clipboard
       --skip-launch                      Skip launching Transmission
