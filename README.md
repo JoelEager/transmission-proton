@@ -1,5 +1,5 @@
 # Transmission Proton Helper
-Simple tool to update [Transmission](https://github.com/transmission/transmission)'s peer port with the value in the clipboard and launch Transmission. Intended to automatically configure and launch Transmission via Proton VPN using the "Connect and Go" profile option. Includes a log file for troubleshooting and history.
+Simple tool to update [Transmission](https://github.com/transmission/transmission)'s peer port with a value from the clipboard and launch Transmission. Intended to configure and launch Transmission via Proton VPN using the "Connect and Go" profile option. Includes a log file for troubleshooting and history.
 
 Mostly vibe coded using [Google Jules](https://jules.google.com/).
 
@@ -21,16 +21,4 @@ Simply run the binary:
 ./target/release/transmission-proton
 ```
 
-### Options
-```
-Usage: transmission-proton [OPTIONS]
-
-Options:
-      --config-dir <CONFIG_DIR>          Directory containing transmission/settings.json
-      --transmission-path <PATH>         Path to Transmission executable
-      --log-file <LOG_FILE>              Path to log file [default: ~/.transmission-proton.log]
-      --port <PORT>                      Override port value directly instead of reading clipboard
-      --skip-launch                      Skip launching Transmission
-  -h, --help                             Print help
-  -V, --version                          Print version
-```
+It should automatically detect the Transmission configuration path and executable for your platform. If not, the defaults can be overridden with command line options. (Run with `--help` for usage.)
