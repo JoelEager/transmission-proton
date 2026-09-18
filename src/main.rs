@@ -2,8 +2,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::thread;
-use std::time::Duration;
 
 use arboard::Clipboard;
 use chrono::Local;
@@ -108,6 +106,59 @@ fn get_port_from_clipboard() -> Result<u16, String> {
     Ok(port)
 }
 
+fn clear_clipboard(logger: &Logger) {
+    match Clipboard::new() {
+        Ok(mut clipboard) => {
+            if clipboard.clear().is_err() {
+                // If clear fails, try setting empty text as fallback
+                let _ = clipboard.set_text("");
+            }
+            logger.log("Clipboard reset to empty.");
+        }
+        Err(e) => {
+            logger.log(&format!("Failed to access clipboard to reset: {}", e));
+        }
+    }
+}
+
+fn poll_port_from_clipboard_with_interval(
+    logger: &Logger,
+    total_attempts: u32,
+    sleep_duration: std::time::Duration,
+) -> Result<u16, String> {
+    println!("Copy VPN forwarding port to continue...");
+
+    for attempt in 1..=total_attempts {
+        std::thread::sleep(sleep_duration);
+
+        match get_port_from_clipboard() {
+            Ok(port) => {
+                logger.log(&format!(
+                    "Attempt {}/{}: Found valid port {} on clipboard",
+                    attempt, total_attempts, port
+                ));
+                clear_clipboard(logger);
+                return Ok(port);
+            }
+            Err(err_msg) => {
+                logger.log(&format!("Attempt {}/{}: {}", attempt, total_attempts, err_msg));
+            }
+        }
+    }
+
+    let failure_msg = "Failed to find a valid port on clipboard after 30 seconds.".to_string();
+    logger.log(&failure_msg);
+    Err(failure_msg)
+}
+
+fn poll_port_from_clipboard(logger: &Logger) -> Result<u16, String> {
+    poll_port_from_clipboard_with_interval(
+        logger,
+        6,
+        std::time::Duration::from_secs(5),
+    )
+}
+
 fn update_settings_file(config_dir: &Path, port: u16, logger: &Logger) -> Result<(), String> {
     let settings_path = config_dir.join("transmission").join("settings.json");
     let settings_path_str = settings_path.to_string_lossy();
@@ -162,9 +213,7 @@ fn run_app_logic(args: &Args, logger: &Logger) -> Result<(), String> {
             p
         }
         None => {
-            logger.log("Waiting 5 seconds for clipboard to update...");
-            thread::sleep(Duration::from_secs(5));
-            let p = get_port_from_clipboard()?;
+            let p = poll_port_from_clipboard(&logger)?;
             logger.log(&format!("Using port {} from clipboard", p));
             p
         }
@@ -327,5 +376,48 @@ mod tests {
 
         let log_content = fs::read_to_string(&log_file).unwrap();
         assert!(log_content.contains("ERROR: Port number cannot be 0"));
+    }
+
+    #[test]
+    fn test_poll_port_from_clipboard_timeout() {
+        let dir = tempdir().unwrap();
+        let log_file = dir.path().join("log.txt");
+        let logger = Logger::new(log_file.clone());
+
+        // Ensure clipboard is empty or non-numeric for timeout test
+        if let Ok(mut cb) = Clipboard::new() {
+            let _ = cb.set_text("not_a_port");
+        }
+
+        // Test with short duration and 2 attempts for fast execution
+        let result = poll_port_from_clipboard_with_interval(&logger, 2, std::time::Duration::from_millis(10));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Failed to find a valid port on clipboard after 30 seconds.");
+
+        let log_content = fs::read_to_string(&log_file).unwrap();
+        assert!(log_content.contains("Attempt 1/2:"));
+        assert!(log_content.contains("Attempt 2/2:"));
+        assert!(log_content.contains("Failed to find a valid port on clipboard after 30 seconds."));
+    }
+
+    #[test]
+    fn test_poll_port_from_clipboard_success_and_clear() {
+        let dir = tempdir().unwrap();
+        let log_file = dir.path().join("log.txt");
+        let logger = Logger::new(log_file.clone());
+
+        if let Ok(mut cb) = Clipboard::new() {
+            let _ = cb.set_text("54321");
+            let result = poll_port_from_clipboard_with_interval(&logger, 2, std::time::Duration::from_millis(10));
+            assert_eq!(result.unwrap(), 54321);
+
+            let log_content = fs::read_to_string(&log_file).unwrap();
+            assert!(log_content.contains("Found valid port 54321 on clipboard"));
+            assert!(log_content.contains("Clipboard reset to empty."));
+
+            // Verify clipboard was reset
+            let current_cb_text = cb.get_text().unwrap_or_default();
+            assert!(current_cb_text.trim().is_empty());
+        }
     }
 }
