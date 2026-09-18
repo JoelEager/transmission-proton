@@ -26,7 +26,7 @@ Usage: transmission-proton [OPTIONS]
 Options:
       --config-dir <CONFIG_DIR>          Directory containing transmission/settings.json
       --transmission-path <PATH>         Path to Transmission executable
-      --log-file <LOG_FILE>              Path to log file [default: log.txt]
+      --log-file <LOG_FILE>              Path to log file [default: ~/.transmission-proton.log]
       --port <PORT>                      Override port value directly instead of reading clipboard
       --skip-launch                      Skip launching Transmission
   -h, --help                             Print help

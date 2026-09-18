@@ -22,9 +22,9 @@ pub struct Args {
     #[arg(long)]
     pub transmission_path: Option<PathBuf>,
 
-    /// Path to the log file. Defaults to `log.txt` in the current directory.
-    #[arg(long, default_value = "log.txt")]
-    pub log_file: PathBuf,
+    /// Path to the log file. Defaults to `~/.transmission-proton.log`.
+    #[arg(long)]
+    pub log_file: Option<PathBuf>,
 
     /// Override port value directly instead of reading from clipboard.
     #[arg(long)]
@@ -58,6 +58,12 @@ impl Logger {
         println!("{}", msg);
         self.writeln_file(msg);
     }
+}
+
+fn default_log_file() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|home| home.join(".transmission-proton.log"))
+        .ok_or_else(|| "Could not determine user home directory".to_string())
 }
 
 fn default_config_dir() -> Result<PathBuf, String> {
@@ -141,7 +147,12 @@ fn update_settings_file(config_dir: &Path, port: u16, logger: &Logger) -> Result
 }
 
 fn run_app(args: Args) -> Result<(), String> {
-    let logger = Logger::new(args.log_file);
+    let log_file = match args.log_file {
+        Some(path) => path,
+        None => default_log_file()?,
+    };
+
+    let logger = Logger::new(log_file);
     logger.writeln_file("=== transmission-proton invoked ===");
 
     let config_dir = match args.config_dir {
@@ -232,6 +243,13 @@ mod tests {
     }
 
     #[test]
+    fn test_default_log_file() {
+        let home = dirs::home_dir().expect("Home dir should be present in test env");
+        let expected = home.join(".transmission-proton.log");
+        assert_eq!(default_log_file().unwrap(), expected);
+    }
+
+    #[test]
     fn test_run_app_with_port_override_and_skip_launch() {
         let dir = tempdir().unwrap();
         let trans_dir = dir.path().join("transmission");
@@ -245,7 +263,7 @@ mod tests {
         let args = Args {
             config_dir: Some(dir.path().to_path_buf()),
             transmission_path: None,
-            log_file: log_file.clone(),
+            log_file: Some(log_file.clone()),
             port: Some(60000),
             skip_launch: true,
         };
@@ -269,7 +287,7 @@ mod tests {
         let args = Args {
             config_dir: Some(dir.path().to_path_buf()),
             transmission_path: None,
-            log_file: log_file,
+            log_file: Some(log_file),
             port: Some(60000),
             skip_launch: true,
         };
@@ -287,7 +305,7 @@ mod tests {
         let args = Args {
             config_dir: Some(dir.path().to_path_buf()),
             transmission_path: None,
-            log_file: log_file,
+            log_file: Some(log_file),
             port: Some(0),
             skip_launch: true,
         };
