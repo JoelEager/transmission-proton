@@ -1,5 +1,7 @@
 # Transmission Proton Helper
-Simple tool to update Transmission's peer port with the port copied to clipboard and launch Transmission. Intended to automatically configure and launch Transmission via Proton VPN using the "Connect and Go" profile option.
+Simple tool to update [Transmission](https://github.com/transmission/transmission)'s peer port with the value in the clipboard and launch Transmission. Intended to automatically configure and launch Transmission via Proton VPN using the "Connect and Go" profile option. Includes a log file for troubleshooting and history.
+
+Mostly vibe coded using [Google Jules](https://jules.google.com/).
 
 ## Build Instructions
 ### Prerequisites
