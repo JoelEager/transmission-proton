@@ -235,7 +235,7 @@ fn run_app_logic(args: &Args, logger: &Logger) -> Result<(), String> {
         .map_err(|e| format!("Failed to launch Transmission at '{}': {}", trans_path.display(), e))?;
 
     let finish_time = Local::now().format("%Y-%m-%d %H:%M:%S");
-    logger.log(&format!("Transmission exited at {} with status: {}", finish_time, status));
+    logger.log(&format!("Transmission exited at {} with {}", finish_time, status));
 
     Ok(())
 }
