@@ -1,5 +1,7 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -33,15 +35,20 @@ pub struct Args {
     /// Skip launching Transmission (useful for dry runs and testing).
     #[arg(long)]
     pub skip_launch: bool,
+
+    /// Output log messages to standard output in addition to the log file.
+    #[arg(short, long)]
+    pub verbose: bool,
 }
 
 pub struct Logger {
     log_path: PathBuf,
+    verbose: bool,
 }
 
 impl Logger {
-    pub fn new(log_path: PathBuf) -> Self {
-        Self { log_path }
+    pub fn new(log_path: PathBuf, verbose: bool) -> Self {
+        Self { log_path, verbose }
     }
 
     pub fn writeln_file(&self, msg: &str) {
@@ -55,7 +62,9 @@ impl Logger {
     }
 
     pub fn log(&self, msg: &str) {
-        println!("{}", msg);
+        if self.verbose {
+            println!("{}", msg);
+        }
         self.writeln_file(msg);
     }
 }
@@ -126,7 +135,7 @@ fn poll_port_from_clipboard_with_interval(
     total_attempts: u32,
     sleep_duration: std::time::Duration,
 ) -> Result<u16, String> {
-    println!("Copy VPN forwarding port to continue...");
+    logger.log("Copy VPN forwarding port to continue...");
 
     for attempt in 1..=total_attempts {
         std::thread::sleep(sleep_duration);
@@ -246,7 +255,7 @@ fn run_app(args: Args) -> Result<(), String> {
         None => default_log_file()?,
     };
 
-    let logger = Logger::new(log_file);
+    let logger = Logger::new(log_file, args.verbose);
     logger.writeln_file("=== transmission-proton invoked ===");
 
     if let Err(err) = run_app_logic(&args, &logger) {
@@ -257,10 +266,34 @@ fn run_app(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn setup_verbose_console() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(dwProcessId: u32) -> i32;
+        fn AllocConsole() -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            AllocConsole();
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args = Args::parse();
+    if args.verbose {
+        #[cfg(target_os = "windows")]
+        setup_verbose_console();
+    }
     if let Err(err) = run_app(args) {
         eprintln!("Error: {}", err);
+        if io::stdin().is_terminal() {
+            eprintln!("Press Enter to exit...");
+            let mut buffer = [0u8; 1];
+            let _ = io::stdin().read(&mut buffer);
+        }
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -285,7 +318,7 @@ mod tests {
         fs::write(&settings_file, initial_json).unwrap();
 
         let log_file = dir.path().join("log.txt");
-        let logger = Logger::new(log_file.clone());
+        let logger = Logger::new(log_file.clone(), false);
 
         update_settings_file(dir.path(), 51413, &logger).unwrap();
 
@@ -323,6 +356,7 @@ mod tests {
             log_file: Some(log_file.clone()),
             port: Some(60000),
             skip_launch: true,
+            verbose: false,
         };
 
         assert!(run_app(args).is_ok());
@@ -347,6 +381,7 @@ mod tests {
             log_file: Some(log_file.clone()),
             port: Some(60000),
             skip_launch: true,
+            verbose: false,
         };
 
         let result = run_app(args);
@@ -368,6 +403,7 @@ mod tests {
             log_file: Some(log_file.clone()),
             port: Some(0),
             skip_launch: true,
+            verbose: false,
         };
 
         let result = run_app(args);
@@ -382,7 +418,7 @@ mod tests {
     fn test_poll_port_from_clipboard_timeout() {
         let dir = tempdir().unwrap();
         let log_file = dir.path().join("log.txt");
-        let logger = Logger::new(log_file.clone());
+        let logger = Logger::new(log_file.clone(), false);
 
         // Ensure clipboard is empty or non-numeric for timeout test
         if let Ok(mut cb) = Clipboard::new() {
@@ -404,7 +440,7 @@ mod tests {
     fn test_poll_port_from_clipboard_success_and_clear() {
         let dir = tempdir().unwrap();
         let log_file = dir.path().join("log.txt");
-        let logger = Logger::new(log_file.clone());
+        let logger = Logger::new(log_file.clone(), false);
 
         if let Ok(mut cb) = Clipboard::new() {
             let _ = cb.set_text("54321");
@@ -419,5 +455,29 @@ mod tests {
             let current_cb_text = cb.get_text().unwrap_or_default();
             assert!(current_cb_text.trim().is_empty());
         }
+    }
+
+    #[test]
+    fn test_args_verbose_flag_parsing() {
+        let args_short = Args::parse_from(["transmission-proton", "-v"]);
+        assert!(args_short.verbose);
+
+        let args_long = Args::parse_from(["transmission-proton", "--verbose"]);
+        assert!(args_long.verbose);
+
+        let args_default = Args::parse_from(["transmission-proton"]);
+        assert!(!args_default.verbose);
+    }
+
+    #[test]
+    fn test_logger_file_only_when_not_verbose() {
+        let dir = tempdir().unwrap();
+        let log_file = dir.path().join("log.txt");
+        let logger = Logger::new(log_file.clone(), false);
+
+        logger.log("Hello log file");
+
+        let log_content = fs::read_to_string(&log_file).unwrap();
+        assert!(log_content.contains("Hello log file"));
     }
 }
