@@ -21,4 +21,4 @@ Simply run the binary:
 ./target/release/transmission-proton
 ```
 
-It should automatically detect the Transmission configuration path and executable for your platform. If not, the defaults can be overridden with command line options. (Run with `--help` for usage.)
+It should automatically detect the Transmission configuration path and executable for your platform. If not, the defaults can be overridden with command line options. After launching the binary just copy the port number and it should take care of the rest. (Run with `--help` for usage.)
