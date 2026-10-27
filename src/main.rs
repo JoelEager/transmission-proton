@@ -1,9 +1,13 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod dashboard;
+mod rpc;
+
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::{Arc, Mutex};
 
 use arboard::Clipboard;
 use chrono::Local;
@@ -12,7 +16,11 @@ use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Updates Transmission peer-port from clipboard and launches Transmission.")]
+#[command(
+    author,
+    version,
+    about = "Updates Transmission peer-port from clipboard and launches Transmission."
+)]
 pub struct Args {
     /// Directory containing the `transmission/settings.json` file.
     /// Defaults to %LOCALAPPDATA% on Windows, or ~/.config on Linux/macOS.
@@ -39,6 +47,22 @@ pub struct Args {
     /// Output log messages to standard output in addition to the log file.
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Disable the local session dashboard shown in the browser.
+    #[arg(long)]
+    pub no_dashboard: bool,
+
+    /// Localhost port for the session dashboard server.
+    #[arg(long, default_value_t = 9191)]
+    pub dashboard_port: u16,
+
+    /// Username for Transmission RPC authentication (only needed if authentication is enabled in Transmission).
+    #[arg(long)]
+    pub rpc_username: Option<String>,
+
+    /// Password for Transmission RPC authentication (only needed if authentication is enabled in Transmission).
+    #[arg(long)]
+    pub rpc_password: Option<String>,
 }
 
 pub struct Logger {
@@ -94,7 +118,8 @@ fn default_transmission_path() -> PathBuf {
 }
 
 fn get_port_from_clipboard() -> Result<u16, String> {
-    let mut clipboard = Clipboard::new().map_err(|e| format!("Failed to access clipboard: {}", e))?;
+    let mut clipboard =
+        Clipboard::new().map_err(|e| format!("Failed to access clipboard: {}", e))?;
     let content = clipboard
         .get_text()
         .map_err(|e| format!("Failed to get clipboard text: {}", e))?;
@@ -150,7 +175,10 @@ fn poll_port_from_clipboard_with_interval(
                 return Ok(port);
             }
             Err(err_msg) => {
-                logger.log(&format!("Attempt {}/{}: {}", attempt, total_attempts, err_msg));
+                logger.log(&format!(
+                    "Attempt {}/{}: {}",
+                    attempt, total_attempts, err_msg
+                ));
             }
         }
     }
@@ -161,20 +189,28 @@ fn poll_port_from_clipboard_with_interval(
 }
 
 fn poll_port_from_clipboard(logger: &Logger) -> Result<u16, String> {
-    poll_port_from_clipboard_with_interval(
-        logger,
-        6,
-        std::time::Duration::from_secs(5),
-    )
+    poll_port_from_clipboard_with_interval(logger, 6, std::time::Duration::from_secs(5))
 }
 
-fn update_settings_file(config_dir: &Path, port: u16, logger: &Logger) -> Result<(), String> {
+/// Updates `settings.json` with the new peer port and returns the configured
+/// RPC port. When `enable_rpc` is true, also enables the RPC server restricted
+/// to localhost — Transmission ignores all other remote-access settings when
+/// binding to a loopback address.
+fn update_settings_file(
+    config_dir: &Path,
+    port: u16,
+    enable_rpc: bool,
+    logger: &Logger,
+) -> Result<u16, String> {
     let settings_path = config_dir.join("transmission").join("settings.json");
     let settings_path_str = settings_path.to_string_lossy();
     logger.log(&format!("Opening {}", settings_path_str));
 
     if !settings_path.exists() {
-        return Err(format!("Settings file does not exist: {}", settings_path_str));
+        return Err(format!(
+            "Settings file does not exist: {}",
+            settings_path_str
+        ));
     }
 
     let content = fs::read_to_string(&settings_path)
@@ -184,10 +220,23 @@ fn update_settings_file(config_dir: &Path, port: u16, logger: &Logger) -> Result
         .map_err(|e| format!("Failed to parse JSON from {}: {}", settings_path_str, e))?;
 
     if !settings.is_object() {
-        return Err(format!("Settings file JSON root is not an object: {}", settings_path_str));
+        return Err(format!(
+            "Settings file JSON root is not an object: {}",
+            settings_path_str
+        ));
     }
 
+    let rpc_port = settings["rpc-port"].as_u64().unwrap_or(9091) as u16;
+
     settings["peer-port"] = Value::from(port);
+
+    if enable_rpc {
+        settings["rpc-enabled"] = Value::from(true);
+        settings["rpc-bind-address"] = Value::from("127.0.0.1");
+        settings["rpc-whitelist-enabled"] = Value::from(true);
+        settings["rpc-whitelist"] = Value::from("127.0.0.1,::1");
+        logger.log("Enabled Transmission RPC bound to localhost only (127.0.0.1)");
+    }
 
     // Format JSON with 4 spaces indentation
     let buf = Vec::new();
@@ -201,11 +250,15 @@ fn update_settings_file(config_dir: &Path, port: u16, logger: &Logger) -> Result
         .map_err(|e| format!("Failed to convert serialized JSON to string: {}", e))?;
     updated_json.push('\n');
 
-    fs::write(&settings_path, updated_json)
-        .map_err(|e| format!("Failed to write updated settings to {}: {}", settings_path_str, e))?;
+    fs::write(&settings_path, updated_json).map_err(|e| {
+        format!(
+            "Failed to write updated settings to {}: {}",
+            settings_path_str, e
+        )
+    })?;
 
     logger.log(&format!("Successfully updated port to {}", port));
-    Ok(())
+    Ok(rpc_port)
 }
 
 fn run_app_logic(args: &Args, logger: &Logger) -> Result<(), String> {
@@ -222,31 +275,145 @@ fn run_app_logic(args: &Args, logger: &Logger) -> Result<(), String> {
             p
         }
         None => {
-            let p = poll_port_from_clipboard(&logger)?;
+            let p = poll_port_from_clipboard(logger)?;
             logger.log(&format!("Using port {} from clipboard", p));
             p
         }
     };
 
-    update_settings_file(&config_dir, port, logger)?;
+    let dashboard_enabled = !args.no_dashboard && !args.skip_launch;
+    let rpc_port = update_settings_file(&config_dir, port, dashboard_enabled, logger)?;
 
     if args.skip_launch {
         logger.log("Transmission launch skipped per --skip-launch flag");
         return Ok(());
     }
 
-    let trans_path = args.transmission_path.clone().unwrap_or_else(default_transmission_path);
+    let trans_path = args
+        .transmission_path
+        .clone()
+        .unwrap_or_else(default_transmission_path);
     let start_time = Local::now().format("%Y-%m-%d %H:%M:%S");
-    logger.log(&format!("Starting Transmission at {} ({})", start_time, trans_path.display()));
+    logger.log(&format!(
+        "Starting Transmission at {} ({})",
+        start_time,
+        trans_path.display()
+    ));
 
-    let status = Command::new(&trans_path)
-        .status()
-        .map_err(|e| format!("Failed to launch Transmission at '{}': {}", trans_path.display(), e))?;
+    let stats_cache: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+    let rpc_client = if dashboard_enabled {
+        let client = Arc::new(rpc::RpcClient::new(
+            rpc_port,
+            args.rpc_username.as_deref(),
+            args.rpc_password.as_deref(),
+        ));
+        match dashboard::spawn(
+            args.dashboard_port,
+            client.clone(),
+            stats_cache.clone(),
+            logger,
+        ) {
+            Some(url) => {
+                dashboard::open_in_browser(&url, logger);
+                Some(client)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    run_transmission(&trans_path, rpc_client.as_deref(), &stats_cache, logger)
+}
+
+fn run_transmission(
+    trans_path: &Path,
+    rpc_client: Option<&rpc::RpcClient>,
+    stats_cache: &Mutex<Option<Value>>,
+    logger: &Logger,
+) -> Result<(), String> {
+    let mut child = Command::new(trans_path).spawn().map_err(|e| {
+        format!(
+            "Failed to launch Transmission at '{}': {}",
+            trans_path.display(),
+            e
+        )
+    })?;
+
+    let mut rpc_announced = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                logger.log(&format!("Error waiting for Transmission: {}", e));
+                return Err(format!("Error waiting for Transmission: {}", e));
+            }
+        }
+
+        if let Some(client) = rpc_client
+            && let Ok(stats) = client.session_stats()
+        {
+            *stats_cache.lock().unwrap() = Some(stats);
+            if !rpc_announced {
+                logger.log("Connected to Transmission RPC");
+                rpc_announced = true;
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    };
 
     let finish_time = Local::now().format("%Y-%m-%d %H:%M:%S");
-    logger.log(&format!("Transmission exited at {} with {}", finish_time, status));
+    logger.log(&format!(
+        "Transmission exited at {} with {}",
+        finish_time, status
+    ));
+    log_session_totals(logger, stats_cache);
 
     Ok(())
+}
+
+fn log_session_totals(logger: &Logger, stats_cache: &Mutex<Option<Value>>) {
+    let cache = stats_cache.lock().unwrap();
+    match cache.as_ref().and_then(|s| s.get("current-stats")) {
+        Some(current) => {
+            let downloaded = current["downloadedBytes"].as_f64().unwrap_or(0.0);
+            let uploaded = current["uploadedBytes"].as_f64().unwrap_or(0.0);
+            let seconds = current["secondsActive"].as_f64().unwrap_or(0.0);
+            logger.log(&format!(
+                "Session totals: downloaded {}, uploaded {} over {}",
+                format_bytes(downloaded),
+                format_bytes(uploaded),
+                format_duration(seconds)
+            ));
+        }
+        None => {
+            logger.log("Session totals unavailable (Transmission RPC was not reachable)");
+        }
+    }
+}
+
+fn format_bytes(bytes: f64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{:.1} {}", value, UNITS[unit])
+}
+
+fn format_duration(seconds: f64) -> String {
+    let secs = seconds as u64;
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {}m {}s", hours, mins, secs % 60)
+    } else {
+        format!("{}m {}s", mins, secs % 60)
+    }
 }
 
 fn run_app(args: Args) -> Result<(), String> {
@@ -304,6 +471,9 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// Serializes tests that mutate the shared system clipboard.
+    static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_update_settings_file() {
         let dir = tempdir().unwrap();
@@ -320,16 +490,41 @@ mod tests {
         let log_file = dir.path().join("log.txt");
         let logger = Logger::new(log_file.clone(), false);
 
-        update_settings_file(dir.path(), 51413, &logger).unwrap();
+        let rpc_port = update_settings_file(dir.path(), 51413, false, &logger).unwrap();
+        assert_eq!(rpc_port, 9091);
 
         let updated_content = fs::read_to_string(&settings_file).unwrap();
         let parsed: Value = serde_json::from_str(&updated_content).unwrap();
 
         assert_eq!(parsed["peer-port"], 51413);
         assert_eq!(parsed["download-dir"], "/downloads");
+        assert!(parsed.get("rpc-enabled").is_none());
 
         let log_content = fs::read_to_string(&log_file).unwrap();
         assert!(log_content.contains("Successfully updated port to 51413"));
+    }
+
+    #[test]
+    fn test_update_settings_file_enables_rpc_localhost_only() {
+        let dir = tempdir().unwrap();
+        let trans_dir = dir.path().join("transmission");
+        fs::create_dir_all(&trans_dir).unwrap();
+        let settings_file = trans_dir.join("settings.json");
+
+        fs::write(&settings_file, r#"{"peer-port": 50000, "rpc-port": 8888}"#).unwrap();
+
+        let log_file = dir.path().join("log.txt");
+        let logger = Logger::new(log_file.clone(), false);
+
+        let rpc_port = update_settings_file(dir.path(), 51413, true, &logger).unwrap();
+        assert_eq!(rpc_port, 8888);
+
+        let parsed: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_file).unwrap()).unwrap();
+        assert_eq!(parsed["rpc-enabled"], true);
+        assert_eq!(parsed["rpc-bind-address"], "127.0.0.1");
+        assert_eq!(parsed["rpc-whitelist-enabled"], true);
+        assert_eq!(parsed["rpc-whitelist"], "127.0.0.1,::1");
     }
 
     #[test]
@@ -357,6 +552,10 @@ mod tests {
             port: Some(60000),
             skip_launch: true,
             verbose: false,
+            no_dashboard: false,
+            dashboard_port: 9191,
+            rpc_username: None,
+            rpc_password: None,
         };
 
         assert!(run_app(args).is_ok());
@@ -382,6 +581,10 @@ mod tests {
             port: Some(60000),
             skip_launch: true,
             verbose: false,
+            no_dashboard: false,
+            dashboard_port: 9191,
+            rpc_username: None,
+            rpc_password: None,
         };
 
         let result = run_app(args);
@@ -404,6 +607,10 @@ mod tests {
             port: Some(0),
             skip_launch: true,
             verbose: false,
+            no_dashboard: false,
+            dashboard_port: 9191,
+            rpc_username: None,
+            rpc_password: None,
         };
 
         let result = run_app(args);
@@ -416,6 +623,7 @@ mod tests {
 
     #[test]
     fn test_poll_port_from_clipboard_timeout() {
+        let _guard = CLIPBOARD_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         let log_file = dir.path().join("log.txt");
         let logger = Logger::new(log_file.clone(), false);
@@ -426,9 +634,16 @@ mod tests {
         }
 
         // Test with short duration and 2 attempts for fast execution
-        let result = poll_port_from_clipboard_with_interval(&logger, 2, std::time::Duration::from_millis(10));
+        let result = poll_port_from_clipboard_with_interval(
+            &logger,
+            2,
+            std::time::Duration::from_millis(10),
+        );
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Failed to find a valid port on clipboard after 30 seconds.");
+        assert_eq!(
+            result.unwrap_err(),
+            "Failed to find a valid port on clipboard after 30 seconds."
+        );
 
         let log_content = fs::read_to_string(&log_file).unwrap();
         assert!(log_content.contains("Attempt 1/2:"));
@@ -438,13 +653,18 @@ mod tests {
 
     #[test]
     fn test_poll_port_from_clipboard_success_and_clear() {
+        let _guard = CLIPBOARD_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         let log_file = dir.path().join("log.txt");
         let logger = Logger::new(log_file.clone(), false);
 
         if let Ok(mut cb) = Clipboard::new() {
             let _ = cb.set_text("54321");
-            let result = poll_port_from_clipboard_with_interval(&logger, 2, std::time::Duration::from_millis(10));
+            let result = poll_port_from_clipboard_with_interval(
+                &logger,
+                2,
+                std::time::Duration::from_millis(10),
+            );
             assert_eq!(result.unwrap(), 54321);
 
             let log_content = fs::read_to_string(&log_file).unwrap();

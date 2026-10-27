@@ -1,3 +1,29 @@
+# Visualization Feature
+This branch adds a live visualization rendered in the browser; vibe coded using [Devin](https://devin.ai/).
+
+While Transmission runs, the tool enables Transmission's built-in RPC server and serves a live dashboard at `http://127.0.0.1:9191/` (opened automatically in your browser). The page refreshes every couple of seconds and shows:
+
+- Session download/upload totals, live transfer speeds, active time, and torrent counts
+- Connected peer counts (total, sending to us, getting from us) plus a per-peer list with client name and transfer rates
+- Whether the forwarded peer port is reachable from the internet
+
+Session totals are written to the log file when Transmission exits.
+
+## How it works
+
+The tool writes `"rpc-enabled": true` into `settings.json` alongside the usual `peer-port` update, then proxies a small set of read-only RPC calls for the dashboard. Poll results are also sampled internally so the final session totals can be logged after Transmission exits.
+
+Note that `rpc-enabled` persists in `settings.json`, so Transmission's localhost RPC stays enabled on future launches even without this tool.
+
+## Security posture
+
+- Both the Transmission RPC server and the dashboard server bind to `127.0.0.1` only — nothing is reachable from other machines or the internet. The `rpc-whitelist` is also pinned to `127.0.0.1,::1` as defense in depth.
+- The dashboard only proxies an allowlist of read-only methods (`session-stats`, `torrent-get`, `port-test`). Mutating calls like `torrent-add` or `session-set` are rejected with a 403 before reaching Transmission, so the dashboard endpoint can't be used to control the client.
+- Your existing RPC authentication settings are left untouched. If you've enabled RPC authentication in Transmission, pass credentials via `--rpc-username`/`--rpc-password`.
+- `port-test` makes a periodic outbound request to Transmission's official port-check service (the same one the client's "Test Port" button uses) to report whether the forwarded port is open.
+
+Disable the whole feature with `--no-dashboard`; change the dashboard port with `--dashboard-port`.
+
 # Transmission Proton Helper
 Simple tool to update [Transmission](https://github.com/transmission/transmission)'s peer port with a value from the clipboard and launch Transmission. Intended to configure and launch Transmission via Proton VPN using the "Connect and Go" profile option. Includes a log file for troubleshooting and history.
 

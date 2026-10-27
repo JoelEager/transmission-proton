@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Transmission visualization</title>
+<style>
+  body { background:#14171a; color:#d8dee4; font:14px/1.5 system-ui,sans-serif; max-width:800px; margin:2rem auto; padding:0 1rem; }
+  h1 { font-size:1.4rem; } h2 { font-size:1.1rem; margin-bottom:.25rem; }
+  ul { margin:.25rem 0 1rem; }
+  #status { color:#e0828a; }
+  .ok { color:#7ee2a8; }
+</style>
+</head>
+<body>
+<div id="status">connecting&hellip;</div>
+<ul id="stats"></ul>
+<h2>Peers</h2>
+<ul id="peers"></ul>
+<script>
+async function rpc(method, args) {
+  let r;
+  try {
+    r = await fetch('/rpc', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({method: method, arguments: args || {}})
+    });
+  } catch (e) {
+    // The fetch itself failed, meaning the embedded server is gone —
+    // the transmission-proton process has exited.
+    e.dashboardGone = true;
+    throw e;
+  }
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  return j;
+}
+
+function fmtBytes(n) {
+  const u = ['B','KiB','MiB','GiB','TiB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(1) + ' ' + u[i];
+}
+function fmtDur(s) {
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = Math.floor(s % 60);
+  return (h ? h + 'h ' : '') + m + 'm ' + x + 's';
+}
+function fmtRatio(up, down) {
+  if (!down) return up ? '∞' : '0.00';
+  return (up / down).toFixed(2);
+}
+function li(parent, text) {
+  const el = document.createElement('li');
+  el.textContent = text;
+  parent.appendChild(el);
+  return el;
+}
+
+// Checked once on page load; Transmission does not re-test the port during a session.
+const portStatus = {ipv4: 'unknown', ipv6: 'unknown'};
+async function checkPorts() {
+  for (const proto of ['ipv4', 'ipv6']) {
+    try {
+      const r = await rpc('port-test', {ip_protocol: proto});
+      portStatus[proto] = r['port-is-open'] ? 'open' : 'closed';
+    } catch (e) { /* keep 'unknown' */ }
+  }
+}
+
+async function refresh() {
+  const status = document.getElementById('status');
+  try {
+    const s = await rpc('session-stats');
+    const c = s['current-stats'] || {};
+    const cum = s['cumulative-stats'] || {};
+    const stats = document.getElementById('stats');
+    stats.innerHTML = '';
+    li(stats, 'Downloaded this session: ' + fmtBytes(c.downloadedBytes || 0));
+    li(stats, 'Uploaded this session: ' + fmtBytes(c.uploadedBytes || 0));
+    li(stats, 'Session ratio: ' + fmtRatio(c.uploadedBytes, c.downloadedBytes));
+    li(stats, 'Download speed: ' + fmtBytes(s.downloadSpeed || 0) + '/s');
+    li(stats, 'Upload speed: ' + fmtBytes(s.uploadSpeed || 0) + '/s');
+    li(stats, 'Session time: ' + fmtDur(c.secondsActive || 0));
+    li(stats, 'Active torrents: ' + (s.activeTorrentCount || 0) + ' / ' + (s.torrentCount || 0));
+    li(stats, 'Total downloaded: ' + fmtBytes(cum.downloadedBytes || 0));
+    li(stats, 'Total uploaded: ' + fmtBytes(cum.uploadedBytes || 0));
+    li(stats, 'Total ratio: ' + fmtRatio(cum.uploadedBytes, cum.downloadedBytes));
+    li(stats, 'Forwarded port (IPv4): ' + portStatus.ipv4).className = portStatus.ipv4 === 'open' ? 'ok' : '';
+    li(stats, 'Forwarded port (IPv6): ' + portStatus.ipv6).className = portStatus.ipv6 === 'open' ? 'ok' : '';
+
+    const t = await rpc('torrent-get', {fields: ['name','peers','peersFrom','peersConnected','peersSendingToUs','peersGettingFromUs']});
+    const peers = document.getElementById('peers');
+    peers.innerHTML = '';
+    let connected = 0, sending = 0, getting = 0;
+    let inbound = 0, outbound = 0, seeders = 0, leechers = 0;
+    const sources = {};
+    const all = [];
+    for (const tor of t.torrents || []) {
+      connected += tor.peersConnected || 0;
+      sending += tor.peersSendingToUs || 0;
+      getting += tor.peersGettingFromUs || 0;
+      for (const k in tor.peersFrom || {}) sources[k] = (sources[k] || 0) + tor.peersFrom[k];
+      for (const p of tor.peers || []) {
+        all.push(p);
+        if (p.isIncoming) inbound++; else outbound++;
+        if (p.progress >= 1) seeders++; else leechers++;
+      }
+    }
+    li(peers, 'Connected peers: ' + connected);
+    li(peers, 'Sending to [hostname]: ' + sending);
+    li(peers, 'Receiving from [hostname]: ' + getting);
+    li(peers, 'Inbound (via forwarded port): ' + inbound + ' / Outbound: ' + outbound);
+    li(peers, 'Seeders: ' + seeders + ' / Leechers: ' + leechers);
+    const SOURCE_LABELS = {fromTracker: 'tracker', fromDht: 'distributed hash table (DHT)',
+      fromPex: 'peer exchange (PEX)', fromIncoming: 'incoming',
+      fromLpd: 'local peer discovery (LPD)', fromLtep: 'libtorrent extension (LTEP)',
+      fromHolepunch: 'NAT hole punching', fromCache: 'resume file'};
+    const parts = Object.keys(SOURCE_LABELS)
+      .filter(k => sources[k])
+      .map(k => sources[k] + ' ' + SOURCE_LABELS[k]);
+    if (parts.length) li(peers, 'Peer sources: ' + parts.join(', '));
+    all.sort((a, b) => (b.rateToClient + b.rateToPeer) - (a.rateToClient + a.rateToPeer));
+    const sub = document.createElement('ul');
+    for (const p of all) {
+      const flags = [];
+      if (p.isEncrypted) flags.push('encrypted');
+      if (p.isIncoming) flags.push('incoming');
+      li(sub, p.address + ':' + p.port + ' — ' + (p.clientName || 'unknown')
+        + ' — ↓ ' + fmtBytes(p.rateToClient || 0) + '/s (' + fmtBytes(p.bytesToClient || 0) + ' total)'
+        + ', ↑ ' + fmtBytes(p.rateToPeer || 0) + '/s (' + fmtBytes(p.bytesToPeer || 0) + ' total)'
+        + (flags.length ? ' (' + flags.join(', ') + ')' : ''));
+    }
+    peers.appendChild(sub);
+    status.textContent = '';
+  } catch (e) {
+    if (e && e.dashboardGone) {
+      status.textContent = 'transmission-proton has exited — this dashboard is no longer updating. '
+        + 'Session totals were written to the log file; you can close this tab.';
+      clearInterval(refreshTimer);
+      return;
+    }
+    status.textContent = 'Transmission RPC unavailable: ' + e.message;
+  }
+}
+
+refresh();
+checkPorts();
+const refreshTimer = setInterval(refresh, 2000);
+</script>
+</body>
+</html>
