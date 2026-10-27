@@ -4,18 +4,99 @@
 <meta charset="utf-8">
 <title>Transmission visualization</title>
 <style>
-  body { background:#14171a; color:#d8dee4; font:14px/1.5 system-ui,sans-serif; max-width:800px; margin:2rem auto; padding:0 1rem; }
+  :root { color-scheme: dark; }
+  ::-webkit-scrollbar { width:10px; }
+  ::-webkit-scrollbar-thumb { background:#30363d; border-radius:5px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  body { background:#14171a; color:#d8dee4; font:14px/1.5 system-ui,sans-serif;
+         margin:0; padding:.75rem; height:100vh; box-sizing:border-box;
+         display:flex; gap:.75rem; overflow:hidden; }
   h1 { font-size:1.4rem; } h2 { font-size:1.1rem; margin-bottom:.25rem; }
   ul { margin:.25rem 0 1rem; }
   #status { color:#e0828a; }
   .ok { color:#7ee2a8; }
+  #left { flex:1; display:flex; flex-direction:column; gap:.5rem; min-width:0; }
+  #divider { width:5px; flex-shrink:0; cursor:col-resize; border-radius:3px; }
+  #divider:hover, #divider.drag { background:#30363d; }
+  #right { width:30%; flex-shrink:0; overflow-y:auto; }
+  canvas { display:block; width:100%; background:#0d0f12; border:1px solid #262c33; border-radius:6px; }
+  #speedchart { height:110px; flex-shrink:0; }
+  #swarmwrap { position:relative; flex:1; min-height:0; }
+  #swarm { height:100%; }
+  #tip { position:absolute; display:none; background:#1c2127; border:1px solid #444; border-radius:4px;
+         padding:.3rem .55rem; font-size:12px; line-height:1.4; pointer-events:none; white-space:pre; }
+  #legend { font-size:12px; color:#8b949e; }
+  .dot { display:inline-block; width:.6em; height:.6em; border-radius:50%; margin:0 .3em 0 .9em; vertical-align:middle; }
+  .sgroup { margin-bottom:.7rem; }
+  .sgroup h3 { font-size:.72rem; text-transform:uppercase; letter-spacing:.06em;
+               color:#8b949e; margin:.4rem 0 .15rem; }
+  #stats { display:grid; grid-template-columns:1fr 1fr; gap:0 1rem; align-items:start; }
+  #sourcesrow { grid-column:1 / -1; }
+  .srow { display:flex; justify-content:space-between; gap:.5rem; padding:.18rem .45rem; border-radius:3px; }
+  .srow:nth-child(even) { background:#171b20; }
+  .srow .v { font-variant-numeric:tabular-nums; text-align:right; overflow:hidden; text-overflow:ellipsis; }
+  #peertable { width:100%; border-collapse:collapse; font-size:12px; table-layout:fixed; }
+  #peertable th { text-align:left; color:#8b949e; font-weight:600; padding:.15rem .3rem; }
+  #peertable td { padding:.15rem .3rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #peertable tbody tr:nth-child(even) { background:#171b20; }
+  #peertable td.num, #peertable th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  #peertable td.flags { color:#8b949e; }
+  .tor { background:#171b20; border-radius:4px; padding:.4rem .55rem; margin-bottom:.45rem; }
+  .tor .name { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tor .meta { font-size:12px; color:#8b949e; }
+  .tor .bar { height:3px; background:#30363d; border-radius:2px; margin-top:.35rem; }
+  .tor .bar i { display:block; height:100%; background:#5aa9e6; border-radius:2px; }
 </style>
 </head>
 <body>
+<div id="left">
+<canvas id="speedchart"></canvas>
+<div id="swarmwrap">
+<canvas id="swarm"></canvas>
+<div id="tip"></div>
+</div>
+<div id="legend"><span class="dot" style="background:#5aa9e6"></span>down / leecher<span class="dot" style="background:#7ee2a8"></span>up / seeder · inner orbit = inbound via forwarded port · outer = outbound · ring = encrypted · hover a peer for details</div>
+</div>
+<div id="divider"></div>
+<div id="right">
 <div id="status">connecting&hellip;</div>
-<ul id="stats"></ul>
-<h2>Peers</h2>
-<ul id="peers"></ul>
+<div id="stats">
+<div class="sgroup"><h3>Session</h3>
+<div class="srow" title="Data transferred since Transmission started"><span>Transferred</span><span class="v" id="v-xfer"></span></div>
+<div class="srow" title="Uploaded ÷ downloaded this session"><span>Ratio</span><span class="v" id="v-sratio"></span></div>
+<div class="srow" title="How long Transmission has been running"><span>Time</span><span class="v" id="v-stime"></span></div>
+</div>
+<div class="sgroup"><h3>All time</h3>
+<div class="srow" title="Data transferred across all sessions"><span>Transferred</span><span class="v" id="v-txfer"></span></div>
+<div class="srow" title="Lifetime uploaded ÷ downloaded"><span>Ratio</span><span class="v" id="v-tratio"></span></div>
+</div>
+<div class="sgroup"><h3>Peers</h3>
+<div class="srow" title="Total connected peers (inbound via forwarded port / outbound dialed by us)"><span>Connected</span><span class="v" id="v-connected"></span></div>
+<div class="srow" title="Peers actively sending data to this client (blue edges) / receiving data from this client (green edges)"><span>Downloading / Uploading</span><span class="v" id="v-tofrom"></span></div>
+<div class="srow" title="Peers with the complete torrent / peers still downloading"><span>Seeders / Leechers</span><span class="v" id="v-sdlch"></span></div>
+</div>
+<div class="sgroup"><h3>Forwarded port</h3>
+<div class="srow" title="Whether the VPN-forwarded port is reachable over IPv4"><span>IPv4</span><span class="v" id="v-ipv4"></span></div>
+<div class="srow" title="Whether the VPN-forwarded port is reachable over IPv6"><span>IPv6</span><span class="v" id="v-ipv6"></span></div>
+</div>
+<div class="srow" id="sourcesrow" title="How Transmission discovered each known peer"><span>Peer sources</span><span class="v" id="v-sources"></span></div>
+</div>
+<h2 id="torhead">Active torrents</h2>
+<div id="torrents"></div>
+<h2>Peer list</h2>
+<table id="peertable">
+<colgroup><col style="width:28%"><col style="width:23%"><col class="num" style="width:20%"><col class="num" style="width:20%"><col style="width:4.5%"><col style="width:4.5%"></colgroup>
+<thead><tr>
+  <th title="Remote address and port">Peer</th>
+  <th title="Client name reported by the peer">Client</th>
+  <th class="num" title="Download rate from this peer, with session total">Down</th>
+  <th class="num" title="Upload rate to this peer, with session total">Up</th>
+  <th title="Connection is encrypted">Enc</th>
+  <th title="Peer connected inbound via the forwarded port">In</th>
+</tr></thead>
+<tbody></tbody>
+</table>
+</div>
 <script>
 async function rpc(method, args) {
   let r;
@@ -49,12 +130,13 @@ function fmtRatio(up, down) {
   if (!down) return up ? '∞' : '0.00';
   return (up / down).toFixed(2);
 }
-function li(parent, text) {
-  const el = document.createElement('li');
-  el.textContent = text;
-  parent.appendChild(el);
-  return el;
+function fmtShort(n) {
+  const u = ['', 'K', 'M', 'G', 'T']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (n >= 100 ? Math.round(n) : n.toFixed(1)) + u[i];
 }
+
+
 
 // Checked once on page load; Transmission does not re-test the port during a session.
 const portStatus = {ipv4: 'unknown', ipv6: 'unknown'};
@@ -67,30 +149,336 @@ async function checkPorts() {
   }
 }
 
+// ---- Speed history (kept in-page only, starts when the page opens) ----
+const speedHist = []; // one {d, u} sample per refresh tick
+const SPEED_HIST_MAX = 300; // ~10 minutes at 2s ticks
+function pushSpeed(d, u) {
+  speedHist.push({d, u});
+  if (speedHist.length > SPEED_HIST_MAX) speedHist.shift();
+  drawSpeedChart();
+}
+
+function drawSpeedChart() {
+  const cv = document.getElementById('speedchart'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, pad = 4;
+  ctx.clearRect(0, 0, W, H);
+  if (!speedHist.length) return;
+  const peak = Math.max(1024, ...speedHist.map(p => Math.max(p.d, p.u)));
+  const max = peak * 1.1;
+  const off = SPEED_HIST_MAX - speedHist.length;
+  const x = i => pad + i * (W - 2 * pad) / (SPEED_HIST_MAX - 1);
+  const y = v => H - pad - (v / max) * (H - 2 * pad);
+  for (const [key, color] of [['d', '#5aa9e6'], ['u', '#7ee2a8']]) {
+    ctx.beginPath();
+    ctx.moveTo(x(off), H - pad);
+    speedHist.forEach((p, i) => ctx.lineTo(x(off + i), y(p[key])));
+    ctx.lineTo(x(SPEED_HIST_MAX - 1), H - pad);
+    ctx.closePath();
+    ctx.fillStyle = color + '22';
+    ctx.fill();
+    ctx.beginPath();
+    speedHist.forEach((p, i) => {
+      const xx = x(off + i);
+      if (i === 0) ctx.moveTo(xx, y(p[key])); else ctx.lineTo(xx, y(p[key]));
+    });
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '11px system-ui';
+  ctx.fillText('peak ' + fmtBytes(peak) + '/s', pad + 2, 13);
+}
+
+// ---- Swarm constellation ----
+const swarmNodes = new Map(); // "addr:port" -> node
+let dashPhase = 0;
+let running = true; // cleared when the host process exits
+const latestSpeeds = {d: 0, u: 0}; // last sample from session-stats
+
+function updateSwarm(peers) {
+  const seen = new Set();
+  for (const p of peers) {
+    const key = p.address + ':' + p.port;
+    seen.add(key);
+    let n = swarmNodes.get(key);
+    if (!n) {
+      n = {peer: p, angle: Math.random() * Math.PI * 2, x: 0, y: 0,
+           alpha: 0, targetAlpha: 1, dying: false};
+      swarmNodes.set(key, n);
+    }
+    n.peer = p;
+    n.ring = p.isIncoming ? 'in' : 'out';
+    n.targetAlpha = 1;
+    n.dying = false;
+  }
+  for (const n of swarmNodes.values()) {
+    if (!seen.has(n.peer.address + ':' + n.peer.port)) {
+      n.dying = true;
+      n.targetAlpha = 0;
+    }
+  }
+}
+
+function shortestAngle(d) { return ((d + Math.PI * 3) % (Math.PI * 2)) - Math.PI; }
+
+function tick() {
+  const cv = document.getElementById('swarm'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, CX = W / 2, CY = H / 2;
+  const span = Math.min(W, H);
+  const RINGS = {in: span * 0.27, out: span * 0.43};
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.strokeStyle = '#21262d';
+  ctx.setLineDash([2, 6]);
+  for (const ring in RINGS) {
+    ctx.beginPath(); ctx.arc(CX, CY, RINGS[ring], 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // deterministic angle targets per ring, eased below for organic motion
+  const rings = {in: [], out: []};
+  for (const [key, n] of swarmNodes) if (!n.dying) rings[n.ring].push(key);
+  const targetAngle = new Map();
+  for (const ring in rings) {
+    const ks = rings[ring].sort();
+    ks.forEach((k, i) => targetAngle.set(k, (i + 0.5) * Math.PI * 2 / ks.length));
+  }
+
+  dashPhase += 0.5;
+
+  for (const [key, n] of swarmNodes) {
+    const ta = targetAngle.get(key);
+    if (ta !== undefined) n.angle += shortestAngle(ta - n.angle) * 0.08;
+    n.alpha += (n.targetAlpha - n.alpha) * 0.12;
+    if (n.dying && n.alpha < 0.02) { swarmNodes.delete(key); continue; }
+    const r = RINGS[n.ring];
+    n.x = CX + Math.cos(n.angle) * r;
+    n.y = CY + Math.sin(n.angle) * r;
+  }
+
+  for (const n of swarmNodes.values()) {
+    const down = n.peer.rateToClient || 0, up = n.peer.rateToPeer || 0;
+    const rate = down + up, dirDown = down >= up;
+    ctx.strokeStyle = rate > 0 ? (dirDown ? '#5aa9e6' : '#7ee2a8') : '#30363d';
+    ctx.globalAlpha = n.alpha * (rate > 0 ? 0.85 : 0.5);
+    ctx.lineWidth = rate > 0 ? 0.8 + 3.5 * Math.sqrt(Math.min(1, rate / (2 * 1024 * 1024))) : 0.8;
+    if (rate > 0) {
+      ctx.setLineDash([4, 10]);
+      // Path runs hub -> peer; increasing offset moves dashes toward the
+      // start (hub) = data arriving from the peer, negative = sending.
+      ctx.lineDashOffset = dirDown ? dashPhase : -dashPhase;
+    }
+    ctx.beginPath();
+    ctx.moveTo(CX, CY);
+    ctx.lineTo(n.x, n.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.fillStyle = '#d8dee4';
+  ctx.beginPath(); ctx.arc(CX, CY, 7, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '11px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillText('[hostname]', CX, CY + 22);
+
+  // current session speeds, top-right corner
+  const upTxt = '↑ ' + fmtShort(latestSpeeds.u) + '/s';
+  const dnTxt = '↓ ' + fmtShort(latestSpeeds.d) + '/s';
+  ctx.font = '600 15px system-ui';
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#7ee2a8';
+  ctx.fillText(upTxt, W - 12, 24);
+  ctx.fillStyle = '#5aa9e6';
+  ctx.fillText(dnTxt, W - 12 - ctx.measureText(upTxt).width - 12, 24);
+  ctx.textAlign = 'center';
+
+  for (const n of swarmNodes.values()) {
+    ctx.globalAlpha = n.alpha;
+    ctx.fillStyle = n.peer.progress >= 1 ? '#7ee2a8' : '#5aa9e6';
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    if (n.peer.isEncrypted) {
+      ctx.strokeStyle = '#d8dee4';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+  if (running) requestAnimationFrame(tick);
+}
+
+// hover tooltip for peer nodes
+document.getElementById('swarm').addEventListener('mousemove', e => {
+  const rect = e.target.getBoundingClientRect();
+  const scaleX = e.target.width / rect.width, scaleY = e.target.height / rect.height;
+  const mx = (e.clientX - rect.left) * scaleX, my = (e.clientY - rect.top) * scaleY;
+  let hit = null, best = 12;
+  for (const n of swarmNodes.values()) {
+    const d = Math.hypot(n.x - mx, n.y - my);
+    if (d < best) { best = d; hit = n; }
+  }
+  const tip = document.getElementById('tip');
+  if (!hit) { tip.style.display = 'none'; return; }
+  const p = hit.peer;
+  const flags = [p.isEncrypted && 'encrypted', p.isIncoming && 'incoming'].filter(Boolean).join(', ');
+  tip.textContent = p.address + ':' + p.port + ' — ' + (p.clientName || 'unknown')
+    + '\n↓ ' + fmtBytes(p.rateToClient || 0) + '/s (' + fmtBytes(p.bytesToClient || 0) + ' total)'
+    + '\n↑ ' + fmtBytes(p.rateToPeer || 0) + '/s (' + fmtBytes(p.bytesToPeer || 0) + ' total)'
+    + (flags ? '\n' + flags : '');
+  tip.style.display = 'block';
+  tip.style.left = Math.min(e.clientX - rect.left + 12, rect.width - tip.offsetWidth - 4) + 'px';
+  tip.style.top = (e.clientY - rect.top + 12) + 'px';
+});
+document.getElementById('swarm').addEventListener('mouseleave', () => {
+  document.getElementById('tip').style.display = 'none';
+});
+
+// Fill the window; the drawing code reads canvas dimensions each frame.
+function sizeCanvases() {
+  for (const id of ['speedchart', 'swarm']) {
+    const cv = document.getElementById(id);
+    cv.width = cv.clientWidth;
+    cv.height = cv.clientHeight;
+  }
+  drawSpeedChart();
+}
+window.addEventListener('resize', sizeCanvases);
+sizeCanvases();
+
+// Torrent cards and peer rows are keyed so refreshes update in place
+// instead of rebuilding the DOM (avoids flicker).
+const STATUS = {0: 'Stopped', 1: 'Queued to verify', 2: 'Verifying', 3: 'Queued to download',
+                4: 'Downloading', 5: 'Queued to seed', 6: 'Seeding'};
+const torCards = new Map();
+function updateTorrents(torrents) {
+  const box = document.getElementById('torrents');
+  const ratio = tor => tor.downloadedEver ? tor.uploadedEver / tor.downloadedEver
+    : (tor.uploadedEver ? Infinity : 0);
+  const active = torrents
+    .filter(tor => tor.status === 4 || tor.status === 6)
+    .sort((a, b) => ratio(b) - ratio(a));
+  const seen = new Set();
+  for (const tor of active) {
+    seen.add(tor.id);
+    let e = torCards.get(tor.id);
+    if (!e) {
+      const card = document.createElement('div');
+      card.className = 'tor';
+      const nm = document.createElement('div');
+      nm.className = 'name';
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const meta2 = document.createElement('div');
+      meta2.className = 'meta';
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      const fill = document.createElement('i');
+      bar.appendChild(fill);
+      card.append(nm, meta, meta2, bar);
+      e = {card, nm, meta, meta2, fill};
+      torCards.set(tor.id, e);
+    }
+    e.nm.textContent = tor.name || '(unnamed)';
+    e.meta.textContent = STATUS[tor.status] + ' · ' + Math.round((tor.percentDone || 0) * 100) + '%'
+      + ' · ↓ ' + fmtBytes(tor.rateDownload || 0) + '/s ↑ ' + fmtBytes(tor.rateUpload || 0) + '/s'
+      + ' · ' + (tor.peersConnected || 0) + ' peers';
+    e.meta2.textContent = '↓ ' + fmtBytes(tor.downloadedEver || 0) + ' ↑ ' + fmtBytes(tor.uploadedEver || 0)
+      + ' · ratio ' + fmtRatio(tor.uploadedEver, tor.downloadedEver);
+    e.fill.style.width = ((tor.percentDone || 0) * 100) + '%';
+    box.appendChild(e.card); // moves existing card into sorted position
+  }
+  for (const [id, e] of torCards) {
+    if (!seen.has(id)) { e.card.remove(); torCards.delete(id); }
+  }
+}
+
+const peerRows = new Map();
+function updatePeerTable(all) {
+  const tbody = document.querySelector('#peertable tbody');
+  const now = Date.now();
+  const seen = new Set();
+  for (const p of all) {
+    const key = p.address + ':' + p.port;
+    seen.add(key);
+    let r = peerRows.get(key);
+    if (!r) {
+      const tr = document.createElement('tr');
+      const cells = [];
+      for (let i = 0; i < 6; i++) cells.push(tr.insertCell());
+      cells[2].className = cells[3].className = 'num';
+      cells[4].className = cells[5].className = 'flags';
+      r = {tr, cells, down: 0, up: 0, t: now};
+      peerRows.set(key, r);
+    }
+    // bytes_to_client/bytes_to_peer are snake_case and only exist in
+    // Transmission 4.1+; on older versions accumulate per-peer totals
+    // from the sampled rates.
+    const dt = (now - r.t) / 1000;
+    r.down += (p.rateToClient || 0) * dt;
+    r.up += (p.rateToPeer || 0) * dt;
+    r.t = now;
+    r.cells[0].textContent = key;
+    r.cells[1].textContent = p.clientName || 'unknown';
+    r.cells[2].textContent = fmtShort(p.rateToClient || 0) + '/s · '
+      + fmtShort(p.bytes_to_client ?? r.down);
+    r.cells[3].textContent = fmtShort(p.rateToPeer || 0) + '/s · '
+      + fmtShort(p.bytes_to_peer ?? r.up);
+    r.cells[4].textContent = p.isEncrypted ? '●' : '';
+    r.cells[5].textContent = p.isIncoming ? '●' : '';
+    tbody.appendChild(r.tr); // moves existing row into sorted position
+  }
+  for (const [key, r] of peerRows) {
+    if (!seen.has(key)) { r.tr.remove(); peerRows.delete(key); }
+  }
+}
+
+// draggable split between visualization and stats columns
+document.getElementById('divider').addEventListener('mousedown', e => {
+  e.preventDefault();
+  const divider = e.target, right = document.getElementById('right');
+  divider.classList.add('drag');
+  const move = ev => {
+    const w = window.innerWidth - ev.clientX - 10;
+    right.style.width = Math.min(Math.max(220, w), window.innerWidth * 0.8) + 'px';
+    sizeCanvases();
+  };
+  const up = () => {
+    divider.classList.remove('drag');
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+});
+
 async function refresh() {
   const status = document.getElementById('status');
   try {
     const s = await rpc('session-stats');
     const c = s['current-stats'] || {};
     const cum = s['cumulative-stats'] || {};
-    const stats = document.getElementById('stats');
-    stats.innerHTML = '';
-    li(stats, 'Downloaded this session: ' + fmtBytes(c.downloadedBytes || 0));
-    li(stats, 'Uploaded this session: ' + fmtBytes(c.uploadedBytes || 0));
-    li(stats, 'Session ratio: ' + fmtRatio(c.uploadedBytes, c.downloadedBytes));
-    li(stats, 'Download speed: ' + fmtBytes(s.downloadSpeed || 0) + '/s');
-    li(stats, 'Upload speed: ' + fmtBytes(s.uploadSpeed || 0) + '/s');
-    li(stats, 'Session time: ' + fmtDur(c.secondsActive || 0));
-    li(stats, 'Active torrents: ' + (s.activeTorrentCount || 0) + ' / ' + (s.torrentCount || 0));
-    li(stats, 'Total downloaded: ' + fmtBytes(cum.downloadedBytes || 0));
-    li(stats, 'Total uploaded: ' + fmtBytes(cum.uploadedBytes || 0));
-    li(stats, 'Total ratio: ' + fmtRatio(cum.uploadedBytes, cum.downloadedBytes));
-    li(stats, 'Forwarded port (IPv4): ' + portStatus.ipv4).className = portStatus.ipv4 === 'open' ? 'ok' : '';
-    li(stats, 'Forwarded port (IPv6): ' + portStatus.ipv6).className = portStatus.ipv6 === 'open' ? 'ok' : '';
+    const V = id => document.getElementById(id);
+    V('v-xfer').textContent = '↓' + fmtShort(c.downloadedBytes || 0) + ' / ↑' + fmtShort(c.uploadedBytes || 0);
+    V('v-sratio').textContent = fmtRatio(c.uploadedBytes, c.downloadedBytes);
+    V('v-stime').textContent = fmtDur(c.secondsActive || 0);
+    V('torhead').textContent = 'Active torrents (' + (s.activeTorrentCount || 0) + ')';
+    latestSpeeds.d = s.downloadSpeed || 0;
+    latestSpeeds.u = s.uploadSpeed || 0;
+    V('v-txfer').textContent = '↓' + fmtShort(cum.downloadedBytes || 0) + ' / ↑' + fmtShort(cum.uploadedBytes || 0);
+    V('v-tratio').textContent = fmtRatio(cum.uploadedBytes, cum.downloadedBytes);
+    V('v-ipv4').textContent = portStatus.ipv4;
+    V('v-ipv4').className = 'v' + (portStatus.ipv4 === 'open' ? ' ok' : '');
+    V('v-ipv6').textContent = portStatus.ipv6;
+    V('v-ipv6').className = 'v' + (portStatus.ipv6 === 'open' ? ' ok' : '');
 
-    const t = await rpc('torrent-get', {fields: ['name','peers','peersFrom','peersConnected','peersSendingToUs','peersGettingFromUs']});
-    const peers = document.getElementById('peers');
-    peers.innerHTML = '';
+    const t = await rpc('torrent-get', {fields: ['id','name','status','percentDone','rateDownload','rateUpload',
+      'uploadedEver','downloadedEver','uploadRatio','peers','peersFrom','peersConnected',
+      'peersSendingToUs','peersGettingFromUs']});
+    updateTorrents(t.torrents || []);
     let connected = 0, sending = 0, getting = 0;
     let inbound = 0, outbound = 0, seeders = 0, leechers = 0;
     const sources = {};
@@ -106,37 +494,39 @@ async function refresh() {
         if (p.progress >= 1) seeders++; else leechers++;
       }
     }
-    li(peers, 'Connected peers: ' + connected);
-    li(peers, 'Sending to [hostname]: ' + sending);
-    li(peers, 'Receiving from [hostname]: ' + getting);
-    li(peers, 'Inbound (via forwarded port): ' + inbound + ' / Outbound: ' + outbound);
-    li(peers, 'Seeders: ' + seeders + ' / Leechers: ' + leechers);
-    const SOURCE_LABELS = {fromTracker: 'tracker', fromDht: 'distributed hash table (DHT)',
-      fromPex: 'peer exchange (PEX)', fromIncoming: 'incoming',
-      fromLpd: 'local peer discovery (LPD)', fromLtep: 'libtorrent extension (LTEP)',
+    V('v-connected').textContent = connected + ' (' + inbound + ' in / ' + outbound + ' out)';
+    V('v-tofrom').textContent = sending + ' / ' + getting;
+    V('v-sdlch').textContent = seeders + ' / ' + leechers;
+    const SOURCE_LABELS = {fromTracker: 'tracker', fromDht: 'DHT', fromPex: 'PEX',
+      fromIncoming: 'incoming', fromLpd: 'LPD', fromLtep: 'LTEP',
+      fromHolepunch: 'holepunch', fromCache: 'resume'};
+    const SOURCE_TITLES = {fromTracker: 'tracker', fromDht: 'distributed hash table',
+      fromPex: 'peer exchange', fromIncoming: 'incoming connections',
+      fromLpd: 'local peer discovery', fromLtep: 'libtorrent extension protocol',
       fromHolepunch: 'NAT hole punching', fromCache: 'resume file'};
-    const parts = Object.keys(SOURCE_LABELS)
-      .filter(k => sources[k])
-      .map(k => sources[k] + ' ' + SOURCE_LABELS[k]);
-    if (parts.length) li(peers, 'Peer sources: ' + parts.join(', '));
-    all.sort((a, b) => (b.rateToClient + b.rateToPeer) - (a.rateToClient + a.rateToPeer));
-    const sub = document.createElement('ul');
-    for (const p of all) {
-      const flags = [];
-      if (p.isEncrypted) flags.push('encrypted');
-      if (p.isIncoming) flags.push('incoming');
-      li(sub, p.address + ':' + p.port + ' — ' + (p.clientName || 'unknown')
-        + ' — ↓ ' + fmtBytes(p.rateToClient || 0) + '/s (' + fmtBytes(p.bytesToClient || 0) + ' total)'
-        + ', ↑ ' + fmtBytes(p.rateToPeer || 0) + '/s (' + fmtBytes(p.bytesToPeer || 0) + ' total)'
-        + (flags.length ? ' (' + flags.join(', ') + ')' : ''));
-    }
-    peers.appendChild(sub);
+    const srcKeys = Object.keys(SOURCE_LABELS).filter(k => sources[k]);
+    const srcEl = V('v-sources');
+    srcEl.textContent = srcKeys.map(k => sources[k] + ' ' + SOURCE_LABELS[k]).join(' · ') || '—';
+    srcEl.title = srcKeys.map(k => sources[k] + ' ' + SOURCE_TITLES[k]).join(', ');
+    const peerTotal = p => {
+      const r = peerRows.get(p.address + ':' + p.port) || {};
+      return (p.bytes_to_client ?? r.down ?? 0) + (p.bytes_to_peer ?? r.up ?? 0);
+    };
+    all.sort((a, b) => peerTotal(b) - peerTotal(a));
+    updatePeerTable(all);
+    pushSpeed(s.downloadSpeed || 0, s.uploadSpeed || 0);
+    updateSwarm(all);
+    document.title = '↑' + fmtShort(s.uploadSpeed || 0) + '/s ↓' + fmtShort(s.downloadSpeed || 0) + '/s'
+      + ' ' + fmtShort(c.uploadedBytes || 0) + '/' + fmtShort(c.downloadedBytes || 0)
+      + ' | ' + fmtRatio(cum.uploadedBytes, cum.downloadedBytes);
     status.textContent = '';
   } catch (e) {
     if (e && e.dashboardGone) {
       status.textContent = 'transmission-proton has exited — this dashboard is no longer updating. '
         + 'Session totals were written to the log file; you can close this tab.';
+      document.title = 'Transmission offline';
       clearInterval(refreshTimer);
+      running = false;
       return;
     }
     status.textContent = 'Transmission RPC unavailable: ' + e.message;
@@ -145,6 +535,7 @@ async function refresh() {
 
 refresh();
 checkPorts();
+requestAnimationFrame(tick);
 const refreshTimer = setInterval(refresh, 2000);
 </script>
 </body>
