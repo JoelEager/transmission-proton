@@ -165,9 +165,12 @@ async function checkPorts() {
 // ---- Speed history (kept in-page only, starts when the page opens) ----
 const speedHist = []; // one {d, u} sample per refresh tick
 const SPEED_HIST_MAX = 300; // ~10 minutes at 2s ticks
+const speedPeak = {d: 0, u: 0}; // session max — survives samples aging out of the window
 function pushSpeed(d, u) {
   speedHist.push({d, u});
   if (speedHist.length > SPEED_HIST_MAX) speedHist.shift();
+  speedPeak.d = Math.max(speedPeak.d, d);
+  speedPeak.u = Math.max(speedPeak.u, u);
   drawSpeedChart();
 }
 
@@ -188,8 +191,8 @@ function drawSpeedChart() {
   ctx.clearRect(0, 0, W, H);
   if (!speedHist.length) return;
   const peak = Math.max(1024, ...speedHist.map(p => Math.max(p.d, p.u)));
-  const peakD = Math.max(...speedHist.map(p => p.d));
-  const peakU = Math.max(...speedHist.map(p => p.u));
+  const peakD = speedPeak.d;
+  const peakU = speedPeak.u;
   const max = peak * 1.1;
   const off = SPEED_HIST_MAX - speedHist.length;
   const x = i => pad + i * (W - 2 * pad) / (SPEED_HIST_MAX - 1);
