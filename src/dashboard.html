@@ -814,8 +814,8 @@ async function refresh() {
     status.textContent = '';
   } catch (e) {
     if (e && e.dashboardGone) {
-      status.textContent = 'transmission-proton has exited — this dashboard is no longer updating. '
-        + 'Session totals were written to the log file; you can close this tab.';
+      status.textContent = 'transmission-proton has exited; this dashboard is no longer updating. '
+        + 'Session totals were written to the log file.';
       document.title = 'Transmission offline';
       clearInterval(refreshTimer);
       running = false;
