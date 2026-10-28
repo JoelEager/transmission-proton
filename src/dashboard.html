@@ -129,11 +129,13 @@ async function rpc(method, args) {
 
 function fmtBytes(n) {
   const u = ['B','KiB','MiB','GiB','TiB']; let i = 0;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  // 1023.95 promotes early so rounding never displays "1024.0 B"
+  while (n >= 1023.95 && i < u.length - 1) { n /= 1024; i++; }
   return n.toFixed(1) + ' ' + u[i];
 }
 function fmtDur(s) {
-  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = Math.floor(s % 60);
+  s = Math.round(s);
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
   return (h ? h + 'h ' : '') + m + 'm ' + x + 's';
 }
 function fmtRatio(up, down) {
@@ -142,7 +144,8 @@ function fmtRatio(up, down) {
 }
 function fmtShort(n) {
   const u = ['', 'K', 'M', 'G', 'T']; let i = 0;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  // 1023.5 promotes early so rounding never displays "1024B"
+  while (n >= 1023.5 && i < u.length - 1) { n /= 1024; i++; }
   return (n >= 100 ? Math.round(n) : n.toFixed(1)) + u[i];
 }
 
@@ -358,8 +361,8 @@ function tick() {
   ctx.fillText('[hostname]', CX, CY + 22);
 
   // current session speeds, top-right corner
-  const upTxt = '↑ ' + fmtShort(latestSpeeds.u) + '/s';
-  const dnTxt = '↓ ' + fmtShort(latestSpeeds.d) + '/s';
+  const upTxt = '↑ ' + fmtBytes(latestSpeeds.u) + '/s';
+  const dnTxt = '↓ ' + fmtBytes(latestSpeeds.d) + '/s';
   ctx.font = '600 15px system-ui';
   ctx.textAlign = 'right';
   ctx.fillStyle = '#7ee2a8';
@@ -727,13 +730,13 @@ async function refresh() {
     const c = s['current-stats'] || {};
     const cum = s['cumulative-stats'] || {};
     const V = id => document.getElementById(id);
-    V('v-xfer').textContent = '↓' + fmtShort(c.downloadedBytes || 0) + ' / ↑' + fmtShort(c.uploadedBytes || 0);
+    V('v-xfer').textContent = '↓' + fmtBytes(c.downloadedBytes || 0) + ' / ↑' + fmtBytes(c.uploadedBytes || 0);
     V('v-sratio').textContent = fmtRatio(c.uploadedBytes, c.downloadedBytes);
     V('v-stime').textContent = fmtDur(c.secondsActive || 0);
     V('torhead').textContent = 'Active torrents (' + (s.activeTorrentCount || 0) + ')';
     latestSpeeds.d = s.downloadSpeed || 0;
     latestSpeeds.u = s.uploadSpeed || 0;
-    V('v-txfer').textContent = '↓' + fmtShort(cum.downloadedBytes || 0) + ' / ↑' + fmtShort(cum.uploadedBytes || 0);
+    V('v-txfer').textContent = '↓' + fmtBytes(cum.downloadedBytes || 0) + ' / ↑' + fmtBytes(cum.uploadedBytes || 0);
     V('v-tratio').textContent = fmtRatio(cum.uploadedBytes, cum.downloadedBytes);
     V('v-ipv4').textContent = portStatus.ipv4;
     V('v-ipv4').className = 'v' + (portStatus.ipv4 === 'open' ? ' ok' : '');
