@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
@@ -30,13 +31,19 @@ pub fn spawn(
     };
 
     let hostname = detect_hostname();
+    // Baselines for per-torrent session upload, filled in by the first
+    // torrent-get response the proxy forwards.
+    let baselines: Arc<Mutex<Option<HashMap<String, u64>>>> = Arc::new(Mutex::new(None));
 
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let client = Arc::clone(&client);
             let cache = Arc::clone(&stats_cache);
+            let baselines = Arc::clone(&baselines);
             let hostname = hostname.clone();
-            std::thread::spawn(move || handle_conn(stream, &client, &cache, &hostname));
+            std::thread::spawn(move || {
+                handle_conn(stream, &client, &cache, &baselines, &hostname)
+            });
         }
     });
 
@@ -72,6 +79,7 @@ fn handle_conn(
     mut stream: TcpStream,
     client: &RpcClient,
     stats_cache: &Mutex<Option<Value>>,
+    baselines: &Mutex<Option<HashMap<String, u64>>>,
     hostname: &str,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -91,7 +99,7 @@ fn handle_conn(
     } else {
         match (method.as_str(), path.as_str()) {
             ("GET", "/") => (200u16, INDEX_HTML.replace("[hostname]", hostname)),
-            ("POST", "/rpc") => proxy_rpc(&body, client, stats_cache),
+            ("POST", "/rpc") => proxy_rpc(&body, client, stats_cache, baselines),
             _ => (404, "not found".to_string()),
         }
     };
@@ -112,7 +120,12 @@ fn handle_conn(
     let _ = stream.write_all(payload.as_bytes());
 }
 
-fn proxy_rpc(body: &[u8], client: &RpcClient, stats_cache: &Mutex<Option<Value>>) -> (u16, String) {
+fn proxy_rpc(
+    body: &[u8],
+    client: &RpcClient,
+    stats_cache: &Mutex<Option<Value>>,
+    baselines: &Mutex<Option<HashMap<String, u64>>>,
+) -> (u16, String) {
     let parsed: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => return (400, json!({ "error": e.to_string() }).to_string()),
@@ -133,13 +146,49 @@ fn proxy_rpc(body: &[u8], client: &RpcClient, stats_cache: &Mutex<Option<Value>>
     };
 
     match client.call(method, arguments) {
-        Ok(args) => {
+        Ok(mut args) => {
             if method == "session-stats" {
                 *stats_cache.lock().unwrap() = Some(args.clone());
+            } else if method == "torrent-get" {
+                inject_session_upload(&mut args, baselines);
             }
             (200, args.to_string())
         }
         Err(e) => (502, json!({ "error": e }).to_string()),
+    }
+}
+
+/// Adds `uploadedSeedingSession` to each seeding torrent: bytes uploaded
+/// since the first torrent-get of this process. Transmission only exposes
+/// the all-time `uploadedEver`, so on that first call we snapshot it as
+/// the baseline — but only for torrents already seeding; torrents that
+/// start seeding later never get a baseline and show no badge.
+fn inject_session_upload(args: &mut Value, baselines: &Mutex<Option<HashMap<String, u64>>>) {
+    let Some(torrents) = args.get_mut("torrents").and_then(|t| t.as_array_mut()) else {
+        return;
+    };
+    let mut guard = baselines.lock().unwrap();
+    if guard.is_none() {
+        let mut map = HashMap::new();
+        for t in torrents.iter() {
+            if t["status"].as_u64() == Some(6)
+                && let (Some(h), Some(u)) = (t["hashString"].as_str(), t["uploadedEver"].as_u64())
+            {
+                map.insert(h.to_string(), u);
+            }
+        }
+        *guard = Some(map);
+    }
+    let map = guard.as_ref().unwrap();
+    for t in torrents.iter_mut() {
+        if t["status"].as_u64() != Some(6) {
+            continue;
+        }
+        if let (Some(h), Some(u)) = (t["hashString"].as_str(), t["uploadedEver"].as_u64())
+            && let Some(base) = map.get(h)
+        {
+            t["uploadedSeedingSession"] = json!(u.saturating_sub(*base));
+        }
     }
 }
 
@@ -367,6 +416,39 @@ mod tests {
         );
         assert!(resp.contains("403"), "{}", resp);
         assert!(resp.contains("not allowed"));
+    }
+
+    #[test]
+    fn test_session_upload_baseline_injection() {
+        let baselines = Mutex::new(None);
+
+        // First call: only the seeding torrent gets a baseline; nothing
+        // is injected for a still-downloading one.
+        let mut first = json!({"torrents": [
+            {"id": 1, "status": 6, "hashString": "aaa", "uploadedEver": 1000},
+            {"id": 2, "status": 4, "hashString": "bbb", "uploadedEver": 2000}
+        ]});
+        inject_session_upload(&mut first, &baselines);
+        assert_eq!(baselines.lock().unwrap().as_ref().unwrap().len(), 1);
+        assert_eq!(
+            first["torrents"][0]["uploadedSeedingSession"].as_u64(),
+            Some(0)
+        );
+        assert!(first["torrents"][1].get("uploadedSeedingSession").is_none());
+
+        // Second call: delta injected from the baseline; the now-seeding
+        // "bbb" still has no baseline because it wasn't seeding on the
+        // process's first call.
+        let mut second = json!({"torrents": [
+            {"id": 1, "status": 6, "hashString": "aaa", "uploadedEver": 1750},
+            {"id": 2, "status": 6, "hashString": "bbb", "uploadedEver": 2200}
+        ]});
+        inject_session_upload(&mut second, &baselines);
+        assert_eq!(
+            second["torrents"][0]["uploadedSeedingSession"].as_u64(),
+            Some(750)
+        );
+        assert!(second["torrents"][1].get("uploadedSeedingSession").is_none());
     }
 
     #[test]
