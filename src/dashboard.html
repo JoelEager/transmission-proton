@@ -805,8 +805,8 @@ async function refresh() {
     updatePeerTable(all);
     pushSpeed(s.downloadSpeed || 0, s.uploadSpeed || 0);
     updateSwarm(all);
-    document.title = '↓' + fmtShort(s.downloadSpeed || 0) + '/s ↑' + fmtShort(s.uploadSpeed || 0) + '/s'
-      + ' ' + fmtShort(c.downloadedBytes || 0) + '/' + fmtShort(c.uploadedBytes || 0)
+    document.title = '↓' + fmtShort(s.downloadSpeed || 0) + '/s ' + fmtShort(c.downloadedBytes || 0)
+      + ' | ↑' + fmtShort(s.uploadSpeed || 0) + '/s ' + fmtShort(c.uploadedBytes || 0)
       + ' | ' + fmtRatio(cum.uploadedBytes, cum.downloadedBytes);
     status.textContent = '';
   } catch (e) {
