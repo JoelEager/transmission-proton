@@ -558,9 +558,9 @@ function updateTorrents(torrents) {
     }
     e.nm.textContent = tor.name || '(unnamed)';
     e.nm.title = tor.name || ''; // full name for ellipsized cards
-    e.bar.title = Math.round((tor.percentDone || 0) * 100) + '% Complete';
+    e.bar.title = Math.floor((tor.percentDone || 0) * 100) + '% Complete';
     const etaTxt = tor.eta >= 0 ? ' · ETA ' + (tor.eta > 864000 ? '10d+' : fmtDur(tor.eta)) : '';
-    e.mA.textContent = STATUS[tor.status] + ' · ' + Math.round((tor.percentDone || 0) * 100) + '% · ';
+    e.mA.textContent = STATUS[tor.status] + ' · ' + Math.floor((tor.percentDone || 0) * 100) + '% · ';
     e.mD.textContent = '↓ ' + fmtBytes(tor.rateDownload || 0) + '/s ';
     e.mU.textContent = '↑ ' + fmtBytes(tor.rateUpload || 0) + '/s';
     e.mB.textContent = ' · ' + (tor.peersConnected || 0) + ' Peers' + etaTxt;
