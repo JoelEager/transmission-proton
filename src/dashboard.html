@@ -584,9 +584,9 @@ function updateTorrents(torrents) {
       + (known ? ' · Swarm ' + seeds + 's/' + leechs + 'l' : '')
       + (allFailed ? ' · Tracker error' : '');
     e.meta2.title = 'Lifetime transfers, share ratio, and swarm seeders/leechers reported by trackers'
-      + (trackerErr.length ? '\nFailed announces:\n' + trackerErr.join('\n') : '');
-    // badge only when seeding AND the server recorded a baseline for it
-    if (tor.status === 6 && typeof tor.uploadedSeedingSession === 'number') {
+      + (trackerErr.length ? '\n\nFailed announces:\n- ' + trackerErr.join('\n- ') : '');
+    // badge only when seeding AND the server recorded a baseline for it AND the value is greater than 0
+    if (tor.status === 6 && typeof tor.uploadedSeedingSession === 'number' && tor.uploadedSeedingSession > 0) {
       e.sess.textContent = 'Session ↑ ' + fmtBytes(tor.uploadedSeedingSession);
       e.meta2.appendChild(e.sess);
     } else {
