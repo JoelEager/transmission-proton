@@ -191,26 +191,12 @@ function drawSpeedChart() {
   const x = i => pad + i * (W - 2 * pad) / (SPEED_HIST_MAX - 1);
   const y = v => H - pad - (v / max) * (H - 2 * pad);
 
-  // rate gridlines + labels (left edge)
+  // rate gridlines, drawn under the series
   const step = niceStep(max / 4);
-  ctx.font = '10px system-ui';
-  ctx.textAlign = 'left';
+  ctx.strokeStyle = '#21262d';
   for (let v = step; v < max; v += step) {
     const yy = y(v);
-    ctx.strokeStyle = '#21262d';
     ctx.beginPath(); ctx.moveTo(pad, yy); ctx.lineTo(W - pad, yy); ctx.stroke();
-    ctx.fillStyle = '#8b949e';
-    ctx.fillText(fmtShort(v) + '/s', pad + 2, yy - 2);
-  }
-  // time axis along the bottom; samples are 2s apart, newest at right.
-  // Edge labels are clamped so they aren't clipped by the canvas edge.
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#586069';
-  for (let m = 5; m * 60 <= SPEED_HIST_MAX * 2; m += 5) {
-    const label = '-' + m + 'm';
-    const half = ctx.measureText(label).width / 2;
-    const lx = Math.min(Math.max(x(SPEED_HIST_MAX - 1 - m * 30), pad + half), W - pad - half);
-    ctx.fillText(label, lx, H - pad - 1);
   }
 
   for (const [key, color] of [['d', '#5aa9e6'], ['u', '#7ee2a8']]) {
@@ -229,6 +215,22 @@ function drawSpeedChart() {
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
     ctx.stroke();
+  }
+
+  // labels go last so fills can't cover them; y clamped so the top rate
+  // label isn't clipped, x clamped so edge time labels stay on canvas
+  ctx.font = '10px system-ui';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#8b949e';
+  for (let v = step; v < max; v += step) {
+    ctx.fillText(fmtShort(v) + '/s', pad + 2, Math.max(11, y(v) - 2));
+  }
+  ctx.textAlign = 'center';
+  for (let m = 5; m * 60 <= SPEED_HIST_MAX * 2; m += 5) {
+    const label = '-' + m + 'm';
+    const half = ctx.measureText(label).width / 2;
+    const lx = Math.min(Math.max(x(SPEED_HIST_MAX - 1 - m * 30), pad + half), W - pad - half);
+    ctx.fillText(label, lx, H - pad - 1);
   }
   ctx.font = '11px system-ui';
   ctx.textAlign = 'right';
@@ -577,7 +579,7 @@ function updateTorrents(torrents) {
       + ' · Ratio ' + fmtRatio(tor.uploadedEver, tor.downloadedEver)
       + (known ? ' · Swarm ' + seeds + 's/' + leechs + 'l' : '')
       + (allFailed ? ' · Tracker error' : '');
-    e.meta2.title = 'Lifetime transfers, share ratio, and swarm size reported by trackers'
+    e.meta2.title = 'Lifetime transfers, share ratio, and swarm seeders/leechers reported by trackers'
       + (trackerErr.length ? '\nFailed announces:\n' + trackerErr.join('\n') : '');
     // seeding torrents are complete — the bar and piece map add nothing
     const seeding = tor.status === 6;
@@ -792,8 +794,8 @@ async function refresh() {
     updatePeerTable(all);
     pushSpeed(s.downloadSpeed || 0, s.uploadSpeed || 0);
     updateSwarm(all);
-    document.title = '↑' + fmtShort(s.uploadSpeed || 0) + '/s ↓' + fmtShort(s.downloadSpeed || 0) + '/s'
-      + ' ' + fmtShort(c.uploadedBytes || 0) + '/' + fmtShort(c.downloadedBytes || 0)
+    document.title = '↓' + fmtShort(s.downloadSpeed || 0) + '/s ↑' + fmtShort(s.uploadSpeed || 0) + '/s'
+      + ' ' + fmtShort(c.downloadedBytes || 0) + '/' + fmtShort(c.uploadedBytes || 0)
       + ' | ' + fmtRatio(cum.uploadedBytes, cum.downloadedBytes);
     status.textContent = '';
   } catch (e) {
