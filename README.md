@@ -20,6 +20,7 @@ Note that `rpc-enabled` persists in `settings.json`, so Transmission's localhost
 
 - Both the Transmission RPC server and the dashboard server bind to `127.0.0.1` only — nothing is reachable from other machines or the internet. The `rpc-whitelist` is also pinned to `127.0.0.1,::1` as defense in depth.
 - The dashboard only proxies an allowlist of read-only methods (`session-stats`, `torrent-get`, `port-test`). Mutating calls like `torrent-add` or `session-set` are rejected with a 403 before reaching Transmission, so the dashboard endpoint can't be used to control the client.
+- Requests are rejected unless the `Host` header is a loopback name, and any `Origin` header must be loopback too — this prevents other web pages (or a DNS-rebinding attack) from driving the RPC proxy.
 - Your existing RPC authentication settings are left untouched. If you've enabled RPC authentication in Transmission, pass credentials via `--rpc-username`/`--rpc-password`.
 - `port-test` makes a periodic outbound request to Transmission's official port-check service (the same one the client's "Test Port" button uses) to report whether the forwarded port is open.
 

@@ -75,14 +75,25 @@ fn handle_conn(
     hostname: &str,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let Some((method, path, body)) = read_request(&mut stream) else {
+    let Some((method, path, headers, body)) = read_request(&mut stream) else {
         return;
     };
 
-    let (status, payload) = match (method.as_str(), path.as_str()) {
-        ("GET", "/") => (200u16, INDEX_HTML.replace("[hostname]", hostname)),
-        ("POST", "/rpc") => proxy_rpc(&body, client, stats_cache),
-        _ => (404, "not found".to_string()),
+    // Reject requests that don't come from a loopback context: a browser
+    // page on another origin can't read the response anyway (no CORS
+    // headers), but it could still trigger calls like port-test, and a
+    // DNS-rebinding page could otherwise read everything.
+    let (status, payload) = if !request_is_local(&headers) {
+        (
+            403u16,
+            json!({ "error": "forbidden origin" }).to_string(),
+        )
+    } else {
+        match (method.as_str(), path.as_str()) {
+            ("GET", "/") => (200u16, INDEX_HTML.replace("[hostname]", hostname)),
+            ("POST", "/rpc") => proxy_rpc(&body, client, stats_cache),
+            _ => (404, "not found".to_string()),
+        }
     };
 
     let content_type = if payload.starts_with('<') {
@@ -132,7 +143,9 @@ fn proxy_rpc(body: &[u8], client: &RpcClient, stats_cache: &Mutex<Option<Value>>
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
+fn read_request(
+    stream: &mut TcpStream,
+) -> Option<(String, String, Vec<(String, String)>, Vec<u8>)> {
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 4096];
     let header_end = loop {
@@ -155,10 +168,15 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
     let method = parts.next()?.to_string();
     let path = parts.next()?.to_string();
 
-    let content_length = lines
+    let headers: Vec<(String, String)> = lines
         .filter_map(|l| l.split_once(':'))
-        .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect();
+
+    let content_length = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.parse::<usize>().ok())
         .unwrap_or(0);
 
     let mut body = buf[header_end..].to_vec();
@@ -171,7 +189,43 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
     }
     body.truncate(content_length);
 
-    Some((method, path, body))
+    Some((method, path, headers, body))
+}
+
+fn request_is_local(headers: &[(String, String)]) -> bool {
+    let get = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    };
+    match get("host") {
+        Some(h) if host_is_loopback(h) => {}
+        _ => return false,
+    }
+    // Browsers always send Origin on cross-site POSTs; it must point back
+    // at the dashboard itself. No header at all means curl or a
+    // same-origin request, which is fine.
+    if let Some(origin) = get("origin") {
+        let origin = origin
+            .strip_prefix("http://")
+            .or_else(|| origin.strip_prefix("https://"))
+            .unwrap_or(origin);
+        let host = origin.split('/').next().unwrap_or("");
+        if !host_is_loopback(host) {
+            return false;
+        }
+    }
+    true
+}
+
+fn host_is_loopback(host: &str) -> bool {
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host.split(':').next().unwrap_or("")
+    };
+    matches!(name.trim_end_matches('.'), "127.0.0.1" | "localhost" | "::1")
 }
 
 fn reason(status: u16) -> &'static str {
@@ -250,10 +304,15 @@ mod tests {
     }
 
     fn post(port: u16, path: &str, body: &str) -> String {
+        post_with_headers(port, path, "Host: 127.0.0.1\r\n", body)
+    }
+
+    fn post_with_headers(port: u16, path: &str, headers: &str, body: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let req = format!(
-            "POST {} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            "POST {} HTTP/1.1\r\n{}Content-Length: {}\r\n\r\n{}",
             path,
+            headers,
             body.len(),
             body
         );
@@ -282,7 +341,7 @@ mod tests {
         // Index page
         let mut stream = TcpStream::connect(("127.0.0.1", dash_port)).unwrap();
         stream
-            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             .unwrap();
         let mut resp = String::new();
         stream.read_to_string(&mut resp).unwrap();
@@ -308,5 +367,37 @@ mod tests {
         );
         assert!(resp.contains("403"), "{}", resp);
         assert!(resp.contains("not allowed"));
+    }
+
+    #[test]
+    fn test_dashboard_rejects_non_loopback_host_and_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Logger::new(dir.path().join("log.txt"), false);
+        let rpc_port = mock_rpc_server();
+        let client = Arc::new(RpcClient::new(rpc_port, None, None));
+        let cache = Arc::new(Mutex::new(None));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dash_port = listener.local_addr().unwrap().port();
+        drop(listener);
+        spawn(dash_port, client, cache, &logger).unwrap();
+
+        // DNS-rebinding style request: wrong Host
+        let resp = post_with_headers(
+            dash_port,
+            "/rpc",
+            "Host: evil.example\r\n",
+            r#"{"method":"session-stats","arguments":{}}"#,
+        );
+        assert!(resp.contains("403"), "{}", resp);
+
+        // Cross-origin page POSTing to localhost: right Host, wrong Origin
+        let resp = post_with_headers(
+            dash_port,
+            "/rpc",
+            "Host: 127.0.0.1\r\nOrigin: https://evil.example\r\n",
+            r#"{"method":"session-stats","arguments":{}}"#,
+        );
+        assert!(resp.contains("403"), "{}", resp);
     }
 }
