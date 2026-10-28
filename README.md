@@ -1,10 +1,11 @@
 # Visualization Feature
-This branch adds a live visualization rendered in the browser; vibe coded using [Devin](https://devin.ai/).
+This branch adds a live visualization dashboard rendered in the browser; vibe coded using [Devin](https://devin.ai/).
 
 While Transmission runs, the tool enables Transmission's built-in RPC server and serves a live dashboard at `http://127.0.0.1:9191/` (opened automatically in your browser). The page refreshes every couple of seconds and shows:
 
 - Session download/upload totals, live transfer speeds, active time, and torrent counts
-- Connected peer counts (total, sending to us, getting from us) plus a per-peer list with client name and transfer rates
+- Connected peer counts (total, sending, receiving) plus a deduplicated per-peer list with client name and transfer rates
+- Per-torrent piece maps, ETAs, and tracker-reported swarm health
 - Whether the forwarded peer port is reachable from the internet
 
 Session totals are written to the log file when Transmission exits.
