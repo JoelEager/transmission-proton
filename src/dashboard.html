@@ -313,11 +313,15 @@ function tick() {
   // both are active the two edges are offset perpendicular to the spoke.
   const isMember = n => hoverTid !== null
     && !!(n.peer.torrentIds && n.peer.torrentIds.has(hoverTid));
-  for (const n of swarmNodes.values()) {
+  // a focused peer — hovered in the swarm or the table, or pinned — plus
+  // a hovered torrent's members dim everything else
+  const focusActive = hoverTid !== null || hoverKey !== null || pinnedKey !== null;
+  const isFocused = (key, n) => isMember(n) || key === hoverKey || key === pinnedKey;
+  for (const [key, n] of swarmNodes) {
     const down = n.peer.rateToClient || 0, up = n.peer.rateToPeer || 0;
     const dx = n.x - CX, dy = n.y - CY, len = Math.hypot(dx, dy) || 1;
     const nx = -dy / len, ny = dx / len;
-    const dim = hoverTid !== null && !isMember(n) ? 0.25 : 1;
+    const dim = focusActive && !isFocused(key, n) ? 0.25 : 1;
     const dirs = [];
     if (down > 0) dirs.push({rate: down, color: '#5aa9e6', phase: dashPhase});
     if (up > 0) dirs.push({rate: up, color: '#7ee2a8', phase: -dashPhase});
@@ -365,9 +369,8 @@ function tick() {
   for (const [key, n] of swarmNodes) {
     const prog = Math.min(1, n.peer.progress || 0);
     const col = prog >= 1 ? '#7ee2a8' : '#5aa9e6';
-    const member = isMember(n);
-    const hl = member || key === hoverKey || key === pinnedKey;
-    const dim = hoverTid !== null && !member ? 0.25 : 1;
+    const hl = isFocused(key, n);
+    const dim = focusActive && !hl ? 0.25 : 1;
     const rad = hl ? 8 : 7;
     ctx.globalAlpha = n.alpha * dim * (prog >= 1 ? 1 : 0.28);
     ctx.fillStyle = col;
@@ -518,11 +521,15 @@ function updateTorrents(torrents) {
       const meta = document.createElement('div');
       meta.className = 'meta';
       const mA = document.createElement('span');
+      mA.title = 'Torrent status and download completion';
       const mD = document.createElement('span');
       mD.className = 'dl';
+      mD.title = 'Current download speed';
       const mU = document.createElement('span');
       mU.className = 'ul';
+      mU.title = 'Current upload speed';
       const mB = document.createElement('span');
+      mB.title = 'Connected peers and estimated time to completion';
       meta.append(mA, mD, mU, mB);
       const meta2 = document.createElement('div');
       meta2.className = 'meta';
@@ -541,21 +548,37 @@ function updateTorrents(torrents) {
       torCards.set(tor.id, e);
     }
     e.nm.textContent = tor.name || '(unnamed)';
+    e.nm.title = tor.name || ''; // full name for ellipsized cards
+    e.bar.title = Math.round((tor.percentDone || 0) * 100) + '% Complete';
     const etaTxt = tor.eta >= 0 ? ' · ETA ' + (tor.eta > 864000 ? '10d+' : fmtDur(tor.eta)) : '';
     e.mA.textContent = STATUS[tor.status] + ' · ' + Math.round((tor.percentDone || 0) * 100) + '% · ';
     e.mD.textContent = '↓ ' + fmtBytes(tor.rateDownload || 0) + '/s ';
     e.mU.textContent = '↑ ' + fmtBytes(tor.rateUpload || 0) + '/s';
-    e.mB.textContent = ' · ' + (tor.peersConnected || 0) + ' peers' + etaTxt;
-    let seeds = 0, leechs = 0, known = false, trackerErr = false;
+    e.mB.textContent = ' · ' + (tor.peersConnected || 0) + ' Peers' + etaTxt;
+    let seeds = 0, leechs = 0, known = false, announced = 0;
+    const trackerErr = [];
     for (const ts of tor.trackerStats || []) {
       if (ts.seederCount >= 0) { seeds += ts.seederCount; known = true; }
       if (ts.leecherCount >= 0) leechs += ts.leecherCount;
-      if (ts.lastAnnounceSucceeded === false) trackerErr = true;
+      // trackers that were never announced to (backup tiers, fresh
+      // sessions) report lastAnnounceSucceeded=false — only count ones
+      // that actually announced
+      if (!ts.hasAnnounced) continue;
+      announced++;
+      if (!ts.lastAnnounceSucceeded) {
+        trackerErr.push((ts.host || 'tracker') + ': '
+          + (ts.lastAnnounceResult || 'announce failed'));
+      }
     }
+    // only call it an error when every announced tracker failed; partial
+    // failures still show up in the tooltip
+    const allFailed = announced > 0 && trackerErr.length === announced;
     e.meta2.textContent = '↓ ' + fmtBytes(tor.downloadedEver || 0) + ' ↑ ' + fmtBytes(tor.uploadedEver || 0)
-      + ' · ratio ' + fmtRatio(tor.uploadedEver, tor.downloadedEver)
-      + (known ? ' · swarm ' + seeds + 's/' + leechs + 'l' : '')
-      + (trackerErr ? ' · tracker error' : '');
+      + ' · Ratio ' + fmtRatio(tor.uploadedEver, tor.downloadedEver)
+      + (known ? ' · Swarm ' + seeds + 's/' + leechs + 'l' : '')
+      + (allFailed ? ' · Tracker error' : '');
+    e.meta2.title = 'Lifetime transfers, share ratio, and swarm size reported by trackers'
+      + (trackerErr.length ? '\nFailed announces:\n' + trackerErr.join('\n') : '');
     // seeding torrents are complete — the bar and piece map add nothing
     const seeding = tor.status === 6;
     e.bar.style.display = seeding ? 'none' : '';
