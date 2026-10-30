@@ -45,6 +45,11 @@
   #peertable tbody tr:nth-child(even) { background:#171b20; }
   #peertable td.num, #peertable th.num { text-align:right; font-variant-numeric:tabular-nums; }
   #peertable td.flags { color:#8b949e; }
+  #torbar { display:flex; align-items:center; gap:.4rem; }
+  #torbar h2 { flex:1; margin:0 0 .25rem; }
+  #torsort, #tordir { background:#1c2127; color:#d8dee4; border:1px solid #30363d;
+                      border-radius:4px; font-size:12px; padding:.1rem .3rem; }
+  #tordir { cursor:pointer; padding:.1rem .45rem; }
   .tor { background:#171b20; border-radius:4px; padding:.4rem .55rem; margin-bottom:.45rem; }
   .tor .name { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .tor .meta { font-size:12px; color:#8b949e; }
@@ -90,7 +95,11 @@
 </div>
 <div class="srow" id="sourcesrow" title="How Transmission discovered each known peer"><span>Peer sources</span><span class="v" id="v-sources"></span></div>
 </div>
+<div id="torbar">
 <h2 id="torhead">Active torrents</h2>
+<select id="torsort" title="Sort the torrents list"></select>
+<button id="tordir" title="Toggle sort direction">▼</button>
+</div>
 <div id="torrents"></div>
 <h2>Peer list</h2>
 <table id="peertable">
@@ -510,13 +519,79 @@ sizeCanvases();
 const STATUS = {0: 'Stopped', 1: 'Queued to verify', 2: 'Verifying', 3: 'Queued to download',
                 4: 'Downloading', 5: 'Queued to seed', 6: 'Seeding'};
 const torCards = new Map();
+
+// User-selectable sort for the torrents list. dir is the direction the
+// key gets when first picked (numeric keys default to descending, text
+// to ascending); the ▲/▼ button flips it.
+const torRatio = t => t.downloadedEver ? t.uploadedEver / t.downloadedEver
+  : (t.uploadedEver ? Infinity : 0);
+const TORSORT = {
+  ratio:   {label: 'Ratio',          dir: -1, val: torRatio},
+  name:    {label: 'Name',           dir: 1,  val: t => t.name || ''},
+  status:  {label: 'Status',         dir: 1,  val: t => t.status || 0},
+  pct:     {label: 'Progress',       dir: -1, val: t => t.percentDone || 0},
+  size:    {label: 'Size',           dir: -1, val: t => t.totalSize || 0},
+  dlspeed: {label: 'Down speed',     dir: -1, val: t => t.rateDownload || 0},
+  ulspeed: {label: 'Up speed',       dir: -1, val: t => t.rateUpload || 0},
+  dl:      {label: 'Downloaded',     dir: -1, val: t => t.downloadedEver || 0},
+  ul:      {label: 'Uploaded',       dir: -1, val: t => t.uploadedEver || 0},
+  sessul:  {label: 'Session upload', dir: -1, val: t => t.uploadedSeedingSession ?? -1},
+  peers:   {label: 'Peers',          dir: -1, val: t => t.peersConnected || 0},
+  eta:     {label: 'ETA',            dir: 1,  val: t => t.eta >= 0 ? t.eta : Infinity},
+  added:   {label: 'Date added',     dir: -1, val: t => t.addedDate || 0},
+};
+let torSortKey = 'ratio', torSortDir = -1;
+try {
+  torSortKey = localStorage.getItem('torSortKey') || 'ratio';
+  torSortDir = localStorage.getItem('torSortDir') === '1' ? 1 : -1;
+} catch (e) {}
+if (!TORSORT[torSortKey]) torSortKey = 'ratio';
+
+function compareTorrents(a, b) {
+  const va = TORSORT[torSortKey].val(a), vb = TORSORT[torSortKey].val(b);
+  let c = typeof va === 'string' ? va.localeCompare(vb)
+    : va < vb ? -1 : va > vb ? 1 : 0;
+  if (!c) c = (a.name || '').localeCompare(b.name || '') || (a.id || 0) - (b.id || 0);
+  return c * torSortDir;
+}
+
+let lastTorrents = [];
+const sortSel = document.getElementById('torsort');
+const dirBtn = document.getElementById('tordir');
+for (const k in TORSORT) {
+  const o = document.createElement('option');
+  o.value = k;
+  o.textContent = TORSORT[k].label;
+  sortSel.appendChild(o);
+}
+sortSel.value = torSortKey;
+function applySort() {
+  dirBtn.textContent = torSortDir < 0 ? '▼' : '▲';
+  dirBtn.title = torSortDir < 0 ? 'Sorted descending — click for ascending'
+    : 'Sorted ascending — click for descending';
+  try {
+    localStorage.setItem('torSortKey', torSortKey);
+    localStorage.setItem('torSortDir', String(torSortDir));
+  } catch (e) {}
+  updateTorrents(lastTorrents);
+}
+sortSel.addEventListener('change', () => {
+  torSortKey = sortSel.value;
+  torSortDir = TORSORT[torSortKey].dir;
+  applySort();
+});
+dirBtn.addEventListener('click', () => {
+  torSortDir = -torSortDir;
+  applySort();
+});
+applySort();
+
 function updateTorrents(torrents) {
+  lastTorrents = torrents;
   const box = document.getElementById('torrents');
-  const ratio = tor => tor.downloadedEver ? tor.uploadedEver / tor.downloadedEver
-    : (tor.uploadedEver ? Infinity : 0);
   const active = torrents
     .filter(tor => tor.status === 4 || tor.status === 6)
-    .sort((a, b) => ratio(b) - ratio(a));
+    .sort(compareTorrents);
   const seen = new Set();
   let i = 0;
   for (const tor of active) {
@@ -747,7 +822,7 @@ async function refresh() {
     V('v-ipv6').className = 'v' + (portStatus.ipv6 === 'open' ? ' ok' : '');
 
     const t = await rpc('torrent-get', {fields: ['id','name','status','percentDone','rateDownload','rateUpload',
-      'uploadedEver','downloadedEver','uploadRatio','eta','pieceCount','pieces','trackerStats',
+      'uploadedEver','downloadedEver','uploadRatio','eta','totalSize','addedDate','pieceCount','pieces','trackerStats',
       'hashString','peers','peersFrom','peersConnected','peersSendingToUs','peersGettingFromUs']});
     updateTorrents(t.torrents || []);
     let connected = 0, sending = 0, getting = 0;
