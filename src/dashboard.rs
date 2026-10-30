@@ -36,14 +36,21 @@ pub fn spawn(
     let baselines: Arc<Mutex<Option<HashMap<String, u64>>>> = Arc::new(Mutex::new(None));
 
     std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let client = Arc::clone(&client);
-            let cache = Arc::clone(&stats_cache);
-            let baselines = Arc::clone(&baselines);
-            let hostname = hostname.clone();
-            std::thread::spawn(move || {
-                handle_conn(stream, &client, &cache, &baselines, &hostname)
-            });
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let client = Arc::clone(&client);
+                    let cache = Arc::clone(&stats_cache);
+                    let baselines = Arc::clone(&baselines);
+                    let hostname = hostname.clone();
+                    std::thread::spawn(move || {
+                        handle_conn(stream, &client, &cache, &baselines, &hostname)
+                    });
+                }
+                // Transient accept errors (e.g. fd exhaustion) would
+                // otherwise spin the accept loop.
+                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
         }
     });
 
@@ -82,42 +89,56 @@ fn handle_conn(
     baselines: &Mutex<Option<HashMap<String, u64>>>,
     hostname: &str,
 ) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let Some((method, path, headers, body)) = read_request(&mut stream) else {
-        return;
-    };
+    // Idle keep-alive connections are dropped after this. The dashboard
+    // polls every 2 s, so pooled connections stay busy while the page is
+    // open, and browsers discard pooled sockets the server has closed, so
+    // an expiring idle connection costs at most one reconnect.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(75)));
+    let mut buf: Vec<u8> = Vec::with_capacity(2048);
+    loop {
+        let Some((method, path, version, headers, body)) = read_request(&mut stream, &mut buf)
+        else {
+            return;
+        };
+        let keep_alive = wants_keep_alive(&version, &headers);
 
-    // Reject requests that don't come from a loopback context: a browser
-    // page on another origin can't read the response anyway (no CORS
-    // headers), but it could still trigger calls like port-test, and a
-    // DNS-rebinding page could otherwise read everything.
-    let (status, payload) = if !request_is_local(&headers) {
-        (
-            403u16,
-            json!({ "error": "forbidden origin" }).to_string(),
-        )
-    } else {
-        match (method.as_str(), path.as_str()) {
-            ("GET", "/") => (200u16, INDEX_HTML.replace("[hostname]", hostname)),
-            ("POST", "/rpc") => proxy_rpc(&body, client, stats_cache, baselines),
-            _ => (404, "not found".to_string()),
+        // Reject requests that don't come from a loopback context: a browser
+        // page on another origin can't read the response anyway (no CORS
+        // headers), but it could still trigger calls like port-test, and a
+        // DNS-rebinding page could otherwise read everything.
+        let (status, payload) = if !request_is_local(&headers) {
+            (
+                403u16,
+                json!({ "error": "forbidden origin" }).to_string(),
+            )
+        } else {
+            match (method.as_str(), path.as_str()) {
+                ("GET", "/") => (200u16, INDEX_HTML.replace("[hostname]", hostname)),
+                ("POST", "/rpc") => proxy_rpc(&body, client, stats_cache, baselines),
+                _ => (404, "not found".to_string()),
+            }
+        };
+
+        let content_type = if payload.starts_with('<') {
+            "text/html; charset=utf-8"
+        } else {
+            "application/json"
+        };
+        let header = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n",
+            status,
+            reason(status),
+            content_type,
+            payload.len(),
+            if keep_alive { "keep-alive" } else { "close" }
+        );
+        if stream.write_all(header.as_bytes()).is_err()
+            || stream.write_all(payload.as_bytes()).is_err()
+            || !keep_alive
+        {
+            return;
         }
-    };
-
-    let content_type = if payload.starts_with('<') {
-        "text/html; charset=utf-8"
-    } else {
-        "application/json"
-    };
-    let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        status,
-        reason(status),
-        content_type,
-        payload.len()
-    );
-    let _ = stream.write_all(header.as_bytes());
-    let _ = stream.write_all(payload.as_bytes());
+    }
 }
 
 fn proxy_rpc(
@@ -192,23 +213,27 @@ fn inject_session_upload(args: &mut Value, baselines: &Mutex<Option<HashMap<Stri
     }
 }
 
+/// Parses one request out of `buf`, refilling it from the stream as needed.
+/// Bytes past the end of the request (e.g. a pipelined next request) are
+/// left in `buf` for the following call. Returns (method, path, HTTP
+/// version, headers, body), or None when the connection should be closed.
 fn read_request(
     stream: &mut TcpStream,
-) -> Option<(String, String, Vec<(String, String)>, Vec<u8>)> {
-    let mut buf = Vec::with_capacity(2048);
+    buf: &mut Vec<u8>,
+) -> Option<(String, String, String, Vec<(String, String)>, Vec<u8>)> {
     let mut chunk = [0u8; 4096];
     let header_end = loop {
-        let n = stream.read(&mut chunk).ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
         if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             break pos + 4;
         }
         if buf.len() > 16 * 1024 {
             return None;
         }
+        let n = stream.read(&mut chunk).ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
     };
 
     let head = String::from_utf8_lossy(&buf[..header_end]);
@@ -216,6 +241,7 @@ fn read_request(
     let mut parts = lines.next()?.split_whitespace();
     let method = parts.next()?.to_string();
     let path = parts.next()?.to_string();
+    let version = parts.next().unwrap_or("HTTP/1.0").to_string();
 
     let headers: Vec<(String, String)> = lines
         .filter_map(|l| l.split_once(':'))
@@ -228,17 +254,32 @@ fn read_request(
         .and_then(|(_, v)| v.parse::<usize>().ok())
         .unwrap_or(0);
 
-    let mut body = buf[header_end..].to_vec();
-    while body.len() < content_length {
+    let need = header_end + content_length;
+    while buf.len() < need {
         let n = stream.read(&mut chunk).ok()?;
         if n == 0 {
-            break;
+            return None;
         }
-        body.extend_from_slice(&chunk[..n]);
+        buf.extend_from_slice(&chunk[..n]);
     }
-    body.truncate(content_length);
+    let body = buf[header_end..need].to_vec();
+    buf.drain(..need);
 
-    Some((method, path, headers, body))
+    Some((method, path, version, headers, body))
+}
+
+/// HTTP/1.1 connections stay open unless the client asks to close;
+/// HTTP/1.0 closes unless it explicitly asks for keep-alive.
+fn wants_keep_alive(version: &str, headers: &[(String, String)]) -> bool {
+    let conn = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("connection"))
+        .map(|(_, v)| v.to_ascii_lowercase());
+    match conn.as_deref() {
+        Some(v) if v.contains("close") => false,
+        Some(v) if v.contains("keep-alive") => true,
+        _ => version == "HTTP/1.1",
+    }
 }
 
 fn request_is_local(headers: &[(String, String)]) -> bool {
@@ -359,7 +400,7 @@ mod tests {
     fn post_with_headers(port: u16, path: &str, headers: &str, body: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let req = format!(
-            "POST {} HTTP/1.1\r\n{}Content-Length: {}\r\n\r\n{}",
+            "POST {} HTTP/1.1\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
             path,
             headers,
             body.len(),
@@ -390,7 +431,7 @@ mod tests {
         // Index page
         let mut stream = TcpStream::connect(("127.0.0.1", dash_port)).unwrap();
         stream
-            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
             .unwrap();
         let mut resp = String::new();
         stream.read_to_string(&mut resp).unwrap();
@@ -416,6 +457,78 @@ mod tests {
         );
         assert!(resp.contains("403"), "{}", resp);
         assert!(resp.contains("not allowed"));
+    }
+
+    /// Reads one HTTP response (headers plus Content-Length body) without
+    /// waiting for the connection to close.
+    fn read_http_response(stream: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let header_end = loop {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            let n = stream.read(&mut chunk).unwrap();
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let len = head
+            .lines()
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while buf.len() < header_end + len {
+            let n = stream.read(&mut chunk).unwrap();
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    #[test]
+    fn test_dashboard_keep_alive_serves_multiple_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Logger::new(dir.path().join("log.txt"), false);
+        let rpc_port = mock_rpc_server();
+        let client = Arc::new(RpcClient::new(rpc_port, None, None));
+        let cache = Arc::new(Mutex::new(None));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dash_port = listener.local_addr().unwrap().port();
+        drop(listener);
+        spawn(dash_port, client, cache, &logger).unwrap();
+
+        let mut stream = TcpStream::connect(("127.0.0.1", dash_port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let body = r#"{"method":"session-stats","arguments":{}}"#;
+
+        // HTTP/1.1 defaults to keep-alive: two requests on one connection.
+        for _ in 0..2 {
+            let req = format!(
+                "POST /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(req.as_bytes()).unwrap();
+            let resp = read_http_response(&mut stream);
+            assert!(resp.contains("200 OK"), "{}", resp);
+            assert!(resp.contains("\"ok\":true"));
+            assert!(resp.contains("keep-alive"));
+        }
+
+        // Connection: close is honored and ends the exchange.
+        let req = format!(
+            "POST /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+        let resp = read_http_response(&mut stream);
+        assert!(resp.contains("200 OK"), "{}", resp);
+        let mut rest = String::new();
+        stream.read_to_string(&mut rest).unwrap();
     }
 
     #[test]

@@ -126,8 +126,9 @@ async function rpc(method, args) {
       body: JSON.stringify({method: method, arguments: args || {}})
     });
   } catch (e) {
-    // The fetch itself failed, meaning the embedded server is gone —
-    // the transmission-proton process has exited.
+    // The fetch itself failed — either the embedded server is gone (the
+    // transmission-proton process exited) or the socket layer hiccuped;
+    // refresh() tells them apart after a few consecutive failures.
     e.dashboardGone = true;
     throw e;
   }
@@ -801,6 +802,7 @@ document.getElementById('divider').addEventListener('mousedown', e => {
   document.addEventListener('mouseup', up);
 });
 
+let goneStreak = 0; // consecutive failed fetches to the embedded server
 async function refresh() {
   const status = document.getElementById('status');
   try {
@@ -890,8 +892,16 @@ async function refresh() {
       + ' | ↑' + fmtShort(s.uploadSpeed || 0) + '/s ' + fmtShort(c.uploadedBytes || 0)
       + ' | ' + fmtRatio(cum.uploadedBytes, cum.downloadedBytes);
     status.textContent = '';
+    goneStreak = 0;
   } catch (e) {
     if (e && e.dashboardGone) {
+      // One failed fetch can be a transient socket error (e.g. the OS
+      // running out of buffer space), so only declare the host process
+      // dead after several consecutive failures.
+      if (++goneStreak < 3) {
+        status.textContent = 'Dashboard connection failed — retrying…';
+        return;
+      }
       status.textContent = 'transmission-proton has exited; this dashboard is no longer updating. '
         + 'Session totals were written to the log file.';
       document.title = 'Transmission offline';
